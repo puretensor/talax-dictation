@@ -1,0 +1,42 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+ui/node_modules/
+ui/dist/
+ui/.svelte-kit/
+
+# Generated Tauri schema output
+crates/talax-app/gen/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Models (downloaded at runtime)
+*.bin
+*.gguf
+
+# Database (user data)
+corrections.db
+
+# Security-sensitive local files
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*secret*
+config.yaml
+config.yml
+config.local.*
+id_rsa*
+id_ed25519*
+!**/secret*.py

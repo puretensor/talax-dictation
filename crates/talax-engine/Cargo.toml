@@ -1,0 +1,24 @@
+[package]
+name = "talax-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+regex = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ureq = "3"
+cpal = "0.15"
+whisper-rs = "0.16"
+rdev = "0.5"
+arboard = "3"
+enigo = { version = "0.6", features = ["serde"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
