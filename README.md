@@ -143,7 +143,7 @@ cd ui && npx svelte-check
 
 ### Test Coverage
 
-The engine test suite currently includes 137 unit tests, 34 integration tests, and doctests. Coverage focuses on:
+The engine test suite currently includes 137 unit tests, 36 integration tests, and doctests. Coverage focuses on:
 
 | Area | Covers |
 |------|--------|

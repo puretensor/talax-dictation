@@ -40,6 +40,28 @@ pub struct ProfileManager {
     active_profile: Option<String>,
 }
 
+/// Return whether a profile name is safe to use as a single directory name.
+pub fn is_valid_profile_name(name: &str) -> bool {
+    let len = name.len();
+    len > 0
+        && len <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_profile_name(name: &str) -> Result<(), String> {
+    if is_valid_profile_name(name) {
+        Ok(())
+    } else {
+        Err("Profile name must be 1-64 characters and contain only letters, numbers, '.', '_', or '-'".to_string())
+    }
+}
+
 impl ProfileManager {
     pub fn new(base_dir: PathBuf) -> Self {
         std::fs::create_dir_all(&base_dir).ok();
@@ -57,8 +79,9 @@ impl ProfileManager {
         entries
             .filter_map(|e| {
                 let e = e.ok()?;
-                if e.file_type().ok()?.is_dir() {
-                    Some(e.file_name().to_string_lossy().to_string())
+                let name = e.file_name().to_string_lossy().to_string();
+                if e.file_type().ok()?.is_dir() && is_valid_profile_name(&name) {
+                    Some(name)
                 } else {
                     None
                 }
@@ -68,6 +91,7 @@ impl ProfileManager {
 
     /// Create a new profile. Returns the profile directory path.
     pub fn create_profile(&self, name: &str) -> Result<PathBuf, String> {
+        validate_profile_name(name)?;
         let dir = self.base_dir.join(name);
         if dir.exists() {
             return Err(format!("Profile '{name}' already exists"));
@@ -98,6 +122,7 @@ impl ProfileManager {
 
     /// Delete a profile.
     pub fn delete_profile(&self, name: &str) -> Result<(), String> {
+        validate_profile_name(name)?;
         let dir = self.base_dir.join(name);
         if !dir.exists() {
             return Err(format!("Profile '{name}' does not exist"));
@@ -113,6 +138,8 @@ impl ProfileManager {
 
     /// Clone a profile to a new name.
     pub fn clone_profile(&self, source: &str, target: &str) -> Result<PathBuf, String> {
+        validate_profile_name(source)?;
+        validate_profile_name(target)?;
         let src = self.base_dir.join(source);
         let dst = self.base_dir.join(target);
         if !src.exists() {
@@ -148,17 +175,24 @@ impl ProfileManager {
 
     /// Set active profile.
     pub fn set_active(&mut self, name: &str) {
+        if !is_valid_profile_name(name) {
+            return;
+        }
         self.active_profile = Some(name.to_string());
     }
 
     /// Open the database for a profile.
     pub fn open_db(&self, name: &str) -> Result<Database, String> {
+        validate_profile_name(name)?;
         let path = self.base_dir.join(name).join("corrections.db");
         Database::open(&path).map_err(|e| e.to_string())
     }
 
     /// Load the n-gram model for a profile.
     pub fn load_ngram(&self, name: &str) -> NgramCorrector {
+        if !is_valid_profile_name(name) {
+            return NgramCorrector::new();
+        }
         let path = self.base_dir.join(name).join("ngram.bin");
         NgramCorrector::with_model_path(path)
     }

@@ -24,6 +24,9 @@ Thumbs.db
 
 # Database (user data)
 corrections.db
+*.db-wal
+*.db-shm
+profiles/
 
 # Security-sensitive local files
 .env
