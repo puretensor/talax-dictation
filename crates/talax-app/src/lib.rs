@@ -7,7 +7,6 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir().unwrap_or_default();
             let config_dir = app

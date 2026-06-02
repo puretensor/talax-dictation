@@ -11,7 +11,7 @@ use talax_engine::db::Database;
 use talax_engine::pipeline::CorrectionPipeline;
 use talax_engine::pipeline::dict_corrector::DictionaryCorrector;
 use talax_engine::pipeline::ngram_corrector::NgramCorrector;
-use talax_engine::profile::ProfileManager;
+use talax_engine::profile::{ProfileManager, is_valid_profile_name};
 
 // ---------------------------------------------------------------------------
 // Helper: file-backed test database with raw SQL access for setup.
@@ -668,6 +668,41 @@ fn profile_delete_nonexistent_errors() {
     let result = pm.delete_profile("ghost");
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("does not exist"));
+}
+
+#[test]
+fn profile_names_reject_path_traversal_and_hidden_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(tmp.path().to_path_buf());
+
+    for name in [
+        "",
+        "../escape",
+        "nested/path",
+        "back\\slash",
+        ".hidden",
+        "..",
+    ] {
+        assert!(!is_valid_profile_name(name), "{name:?} should be invalid");
+        assert!(pm.create_profile(name).is_err());
+        assert!(pm.delete_profile(name).is_err());
+        assert!(pm.open_db(name).is_err());
+    }
+
+    assert!(!tmp.path().parent().unwrap().join("escape").exists());
+}
+
+#[test]
+fn profile_list_filters_invalid_directory_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("valid-profile_1")).unwrap();
+    std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+
+    let pm = ProfileManager::new(tmp.path().to_path_buf());
+    let profiles = pm.list_profiles();
+
+    assert!(profiles.contains(&"valid-profile_1".to_string()));
+    assert!(!profiles.contains(&".hidden".to_string()));
 }
 
 #[test]
