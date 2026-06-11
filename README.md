@@ -1,3 +1,7 @@
+>  **Public distribution repo.** This is the public, BSL-1.1 release cut of **TalaX**.
+>  Development happens in the private `puretensor/TalaX` repo; reviewed releases land here as
+>  squashed snapshots. Same product — see TalaX/RELEASING.md for the flow. (88→30 consolidation.)
+
 # TalaX
 
 **Adaptive dictation for developers.** Local Whisper transcription with a 3-layer correction pipeline that improves as you use it.
