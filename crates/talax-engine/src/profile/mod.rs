@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::db::Database;
-use crate::pipeline::ngram_corrector::NgramCorrector;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProfileMetadata {
@@ -186,15 +185,6 @@ impl ProfileManager {
         validate_profile_name(name)?;
         let path = self.base_dir.join(name).join("corrections.db");
         Database::open(&path).map_err(|e| e.to_string())
-    }
-
-    /// Load the n-gram model for a profile.
-    pub fn load_ngram(&self, name: &str) -> NgramCorrector {
-        if !is_valid_profile_name(name) {
-            return NgramCorrector::new();
-        }
-        let path = self.base_dir.join(name).join("ngram.bin");
-        NgramCorrector::with_model_path(path)
     }
 }
 

@@ -43,11 +43,6 @@ impl AudioConfig {
     pub fn chunk_samples(&self) -> usize {
         (self.sample_rate as usize * self.chunk_duration_ms as usize) / 1000
     }
-
-    /// Duration of one sample in seconds.
-    pub fn sample_duration_secs(&self) -> f64 {
-        1.0 / self.sample_rate as f64
-    }
 }
 
 #[cfg(test)]
