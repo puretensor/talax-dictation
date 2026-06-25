@@ -743,6 +743,29 @@ fn profile_clone_and_independence() {
 }
 
 #[test]
+fn profile_clone_uses_consistent_sqlite_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(tmp.path().to_path_buf());
+
+    pm.create_profile("source").unwrap();
+    let source_db = pm.open_db("source").unwrap();
+    source_db.create_session("s1", "/tmp/a.wav", 5.0).unwrap();
+    source_db
+        .add_segments("s1", &[(0.0, 5.0, "hello world")])
+        .unwrap();
+
+    // Clone while the source database connection is still live. The clone
+    // path must use SQLite's snapshot machinery rather than a raw file copy
+    // of corrections.db plus possibly-changing WAL/SHM sidecars.
+    pm.clone_profile("source", "target").unwrap();
+
+    let cloned_db = pm.open_db("target").unwrap();
+    let detail = cloned_db.get_session_detail("s1").unwrap();
+    assert_eq!(detail.segments.len(), 1);
+    assert_eq!(detail.segments[0].original_text, "hello world");
+}
+
+#[test]
 fn profile_clone_updates_name_in_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let pm = ProfileManager::new(tmp.path().to_path_buf());
