@@ -302,7 +302,7 @@ fn ngram_train_populates_vocabulary() {
 #[test]
 fn ngram_save_load_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
-    let model_path = tmp.path().join("ngram.bin");
+    let model_path = tmp.path().join("ngram.json");
 
     let mut corrector = NgramCorrector::new();
     corrector.train(&[
@@ -341,7 +341,7 @@ fn ngram_save_load_roundtrip() {
 #[test]
 fn ngram_with_model_path_loads_on_construction() {
     let tmp = tempfile::tempdir().unwrap();
-    let model_path = tmp.path().join("ngram.bin");
+    let model_path = tmp.path().join("ngram.json");
 
     let mut corrector = NgramCorrector::new();
     corrector.train(&["hello world foo bar".to_string()]);
@@ -408,7 +408,7 @@ fn db_save_corrections_creates_patterns() {
     db.save_corrections("sess1", &[(0, "the GCP is rising")])
         .unwrap();
 
-    let patterns = db.get_all_patterns();
+    let patterns = db.get_all_patterns().unwrap();
     assert!(
         patterns
             .iter()
@@ -429,7 +429,7 @@ fn db_save_corrections_increments_frequency() {
         db.save_corrections(&sid, &[(0, "the GCP")]).unwrap();
     }
 
-    let patterns = db.get_all_patterns();
+    let patterns = db.get_all_patterns().unwrap();
     let matching: Vec<_> = patterns
         .iter()
         .filter(|p| p.original == "gdp" && p.corrected == "GCP")
@@ -462,7 +462,7 @@ fn db_auto_apply_rebuild_via_save_corrections() {
     }
 
     // freq=3, confidence=3/(3+0+1)=0.75 => auto-apply.
-    let auto = db.get_auto_corrections();
+    let auto = db.get_auto_corrections().unwrap();
     assert!(
         auto.iter()
             .any(|p| p.original == "teh" && p.corrected == "the"),
@@ -471,7 +471,7 @@ fn db_auto_apply_rebuild_via_save_corrections() {
     );
 
     // Verify it's a single row with freq=3.
-    let all = db.get_all_patterns();
+    let all = db.get_all_patterns().unwrap();
     let matching: Vec<_> = all
         .iter()
         .filter(|p| p.original == "teh" && p.corrected == "the")
@@ -500,7 +500,7 @@ fn db_auto_apply_rebuild_with_file_backed_db() {
     db.save_corrections("trigger_sess", &[(0, "dummy text")])
         .unwrap();
 
-    let auto = db.get_auto_corrections();
+    let auto = db.get_auto_corrections().unwrap();
     assert!(
         auto.iter()
             .any(|p| p.original == "teh" && p.corrected == "the"),
@@ -521,7 +521,7 @@ fn db_auto_apply_not_set_below_threshold() {
         db.save_corrections(&sid, &[(0, "the quick")]).unwrap();
     }
 
-    let auto = db.get_auto_corrections();
+    let auto = db.get_auto_corrections().unwrap();
     assert!(
         auto.is_empty(),
         "with only 2 corrections, nothing should be auto-apply: {:?}",
@@ -584,7 +584,7 @@ fn db_domain_context_returns_default_for_missing_file() {
 fn db_statistics() {
     let db = Database::open_memory().unwrap();
 
-    let stats = db.get_stats();
+    let stats = db.get_stats().unwrap();
     assert_eq!(stats.session_count, 0);
     assert_eq!(stats.pattern_count, 0);
     assert_eq!(stats.auto_apply_count, 0);
@@ -596,7 +596,7 @@ fn db_statistics() {
     db.add_segments("s1", &[(0.0, 5.0, "teh quick")]).unwrap();
     db.save_corrections("s1", &[(0, "the quick")]).unwrap();
 
-    let stats = db.get_stats();
+    let stats = db.get_stats().unwrap();
     assert_eq!(stats.session_count, 2);
     assert_eq!(stats.pattern_count, 1);
     // freq=1 < 3, so auto_apply_count should be 0.
@@ -617,7 +617,7 @@ fn db_segments_counted_on_session() {
     )
     .unwrap();
 
-    let stats = db.get_stats();
+    let stats = db.get_stats().unwrap();
     assert_eq!(stats.session_count, 1);
 }
 
@@ -720,7 +720,7 @@ fn profile_clone_and_independence() {
     // Clone should have the original's data.
     let cloned_db = pm.open_db("cloned").unwrap();
     assert_eq!(
-        cloned_db.get_stats().session_count,
+        cloned_db.get_stats().unwrap().session_count,
         1,
         "clone should have the original's session"
     );
@@ -732,14 +732,14 @@ fn profile_clone_and_independence() {
     // Original should be unaffected.
     let orig_db = pm.open_db("original").unwrap();
     assert_eq!(
-        orig_db.get_stats().session_count,
+        orig_db.get_stats().unwrap().session_count,
         1,
         "original should be unaffected by clone modifications"
     );
 
     // Clone should now have 2.
     let cloned_db = pm.open_db("cloned").unwrap();
-    assert_eq!(cloned_db.get_stats().session_count, 2);
+    assert_eq!(cloned_db.get_stats().unwrap().session_count, 2);
 }
 
 #[test]
@@ -760,7 +760,7 @@ fn profile_clone_uses_consistent_sqlite_snapshot() {
     pm.clone_profile("source", "target").unwrap();
 
     let cloned_db = pm.open_db("target").unwrap();
-    let detail = cloned_db.get_session_detail("s1").unwrap();
+    let detail = cloned_db.get_session_detail("s1").unwrap().unwrap();
     assert_eq!(detail.segments.len(), 1);
     assert_eq!(detail.segments[0].original_text, "hello world");
 }
@@ -793,14 +793,14 @@ fn profile_reset_clears_data() {
     let db = pm.open_db("resettable").unwrap();
     db.create_session("s1", "/tmp/a.wav", 5.0).unwrap();
     db.add_segments("s1", &[(0.0, 5.0, "hello world")]).unwrap();
-    assert_eq!(db.get_stats().session_count, 1);
+    assert_eq!(db.get_stats().unwrap().session_count, 1);
     drop(db);
 
     pm.reset_profile("resettable").unwrap();
 
     let db = pm.open_db("resettable").unwrap();
-    assert_eq!(db.get_stats().session_count, 0);
-    assert_eq!(db.get_stats().pattern_count, 0);
+    assert_eq!(db.get_stats().unwrap().session_count, 0);
+    assert_eq!(db.get_stats().unwrap().pattern_count, 0);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! Lightweight trigram language model trained on the user's corrected text.
 //! Port of /opt/dictation/server/ngram_corrector.py
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::db::CorrectionPattern;
@@ -14,19 +14,87 @@ type Trigrams = HashMap<(String, String), HashMap<String, u32>>;
 type Bigrams = HashMap<String, HashMap<String, u32>>;
 type Unigrams = HashMap<String, u32>;
 
-/// Serializable n-gram model state.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+/// Runtime n-gram model state.
+///
+/// `trigrams` intentionally uses tuple keys for efficient lookup. That shape
+/// cannot be represented as JSON object keys, so persistence uses
+/// `PersistedNgramModel` below instead of serializing this struct directly.
+#[derive(Default)]
 pub struct NgramModel {
     pub trigrams: Trigrams,
     pub bigrams: Bigrams,
     pub unigrams: Unigrams,
-    pub vocab: std::collections::HashSet<String>,
+    pub vocab: HashSet<String>,
     pub corrections_index: HashMap<String, Vec<String>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedNgramModel {
+    trigrams: Vec<PersistedTrigram>,
+    bigrams: Bigrams,
+    unigrams: Unigrams,
+    vocab: HashSet<String>,
+    corrections_index: HashMap<String, Vec<String>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedTrigram {
+    previous_previous: String,
+    previous: String,
+    next_counts: HashMap<String, u32>,
+}
+
+impl From<&NgramModel> for PersistedNgramModel {
+    fn from(model: &NgramModel) -> Self {
+        let trigrams = model
+            .trigrams
+            .iter()
+            .map(
+                |((previous_previous, previous), next_counts)| PersistedTrigram {
+                    previous_previous: previous_previous.clone(),
+                    previous: previous.clone(),
+                    next_counts: next_counts.clone(),
+                },
+            )
+            .collect();
+
+        Self {
+            trigrams,
+            bigrams: model.bigrams.clone(),
+            unigrams: model.unigrams.clone(),
+            vocab: model.vocab.clone(),
+            corrections_index: model.corrections_index.clone(),
+        }
+    }
+}
+
+impl From<PersistedNgramModel> for NgramModel {
+    fn from(model: PersistedNgramModel) -> Self {
+        let trigrams = model
+            .trigrams
+            .into_iter()
+            .map(|entry| ((entry.previous_previous, entry.previous), entry.next_counts))
+            .collect();
+
+        Self {
+            trigrams,
+            bigrams: model.bigrams,
+            unigrams: model.unigrams,
+            vocab: model.vocab,
+            corrections_index: model.corrections_index,
+        }
+    }
 }
 
 pub struct NgramCorrector {
     model: NgramModel,
     model_path: Option<PathBuf>,
+}
+
+impl Default for NgramCorrector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NgramCorrector {
@@ -58,7 +126,7 @@ impl NgramCorrector {
         !self.model.unigrams.is_empty()
     }
 
-    pub fn vocab(&self) -> &std::collections::HashSet<String> {
+    pub fn vocab(&self) -> &HashSet<String> {
         &self.model.vocab
     }
 
@@ -180,16 +248,16 @@ impl NgramCorrector {
 
         // Apply in reverse order to preserve positions
         let mut sorted = suggestions;
-        sorted.sort_by(|a, b| b.position.cmp(&a.position));
+        sorted.sort_by_key(|change| std::cmp::Reverse(change.position));
 
         for s in sorted {
             if let (Some(pos), Some(orig_score), Some(corr_score)) =
                 (s.position, s.original_score, s.corrected_score)
+                && pos < words.len()
+                && corr_score > orig_score * 3.0
             {
-                if pos < words.len() && corr_score > orig_score * 3.0 {
-                    words[pos] = s.corrected.clone();
-                    changes.push(s);
-                }
+                words[pos] = s.corrected.clone();
+                changes.push(s);
             }
         }
 
@@ -216,21 +284,21 @@ impl NgramCorrector {
             let (w0, w1, w2) = (&padded[i - 2], &padded[i - 1], &padded[i]);
             let score = self.score_word(w2, w0, w1);
 
-            if score < threshold {
-                if let Some(candidates) = self.model.corrections_index.get(w2.as_str()) {
-                    for candidate in candidates {
-                        let cand_score = self.score_word(&candidate.to_lowercase(), w0, w1);
-                        if cand_score > score * 2.0 {
-                            suggestions.push(Change {
-                                layer: "ngram".to_string(),
-                                position: Some(i - 2),
-                                original: w2.clone(),
-                                corrected: candidate.clone(),
-                                rule_freq: None,
-                                original_score: Some(score),
-                                corrected_score: Some(cand_score),
-                            });
-                        }
+            if score < threshold
+                && let Some(candidates) = self.model.corrections_index.get(w2.as_str())
+            {
+                for candidate in candidates {
+                    let cand_score = self.score_word(&candidate.to_lowercase(), w0, w1);
+                    if cand_score > score * 2.0 {
+                        suggestions.push(Change {
+                            layer: "ngram".to_string(),
+                            position: Some(i - 2),
+                            original: w2.clone(),
+                            corrected: candidate.clone(),
+                            rule_freq: None,
+                            original_score: Some(score),
+                            corrected_score: Some(cand_score),
+                        });
                     }
                 }
             }
@@ -239,9 +307,9 @@ impl NgramCorrector {
         suggestions
     }
 
-    /// Save model to a file using bincode.
+    /// Save model to a file using serde_json.
     pub fn save(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-        let encoded = bincode::serialize(&self.model)?;
+        let encoded = serde_json::to_vec(&PersistedNgramModel::from(&self.model))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -249,12 +317,12 @@ impl NgramCorrector {
         Ok(())
     }
 
-    /// Load model from a bincode file.
+    /// Load model from a serde_json file.
     pub fn load_from(&mut self, path: &std::path::Path) {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(model) = bincode::deserialize::<NgramModel>(&data) {
-                self.model = model;
-            }
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(model) = serde_json::from_slice::<PersistedNgramModel>(&data)
+        {
+            self.model = model.into();
         }
     }
 }

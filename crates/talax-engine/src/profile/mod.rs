@@ -2,7 +2,7 @@
 //!
 //! Each profile is a directory containing:
 //! - corrections.db (SQLite)
-//! - ngram.bin (bincode-serialized n-gram model)
+//! - ngram.json (serde_json-serialized n-gram cache)
 //! - domain_context.json (vocabulary)
 //! - profile.toml (metadata)
 

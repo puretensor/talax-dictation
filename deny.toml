@@ -1,0 +1,27 @@
+# cargo-deny policy for TalaX.
+# Checks focus on actionable release blockers: vulnerable/yanked crates,
+# wildcard dependencies, unexpected registries, and unexpected git sources.
+# Unmaintained/unsound transitive advisories from the Tauri/GTK stack are
+# tracked by `cargo audit` output but are not CI blockers unless they apply to
+# workspace crates directly.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+unsound = "workspace"
+ignore = []
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

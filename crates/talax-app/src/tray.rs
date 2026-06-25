@@ -34,11 +34,11 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+            if let tauri::tray::TrayIconEvent::Click { .. } = event
+                && let Some(window) = tray.app_handle().get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         })
         .build(app)?;

@@ -134,10 +134,10 @@ impl AppState {
         );
 
         // Set model path if downloaded
-        if let Some(path) = model_mgr.get_model_path(&config.model) {
-            if path.exists() {
-                recording.set_model_path(path);
-            }
+        if let Some(path) = model_mgr.get_model_path(&config.model)
+            && path.exists()
+        {
+            recording.set_model_path(path);
         }
 
         Self {
@@ -181,21 +181,20 @@ fn parse_config(contents: &str) -> Option<AppConfig> {
 /// Load config from disk, or create a default one if missing.
 pub fn load_or_create_config(config_dir: &Path) -> AppConfig {
     let path = config_path(config_dir);
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        if let Some(config) = parse_config(&contents) {
-            let _ = save_config_to_disk(config_dir, &config);
-            return config;
-        }
+    if let Ok(contents) = std::fs::read_to_string(&path)
+        && let Some(config) = parse_config(&contents)
+    {
+        let _ = save_config_to_disk(config_dir, &config);
+        return config;
     }
 
     let legacy_path = legacy_config_path();
-    if legacy_path != path {
-        if let Ok(contents) = std::fs::read_to_string(&legacy_path) {
-            if let Some(config) = parse_config(&contents) {
-                let _ = save_config_to_disk(config_dir, &config);
-                return config;
-            }
-        }
+    if legacy_path != path
+        && let Ok(contents) = std::fs::read_to_string(&legacy_path)
+        && let Some(config) = parse_config(&contents)
+    {
+        let _ = save_config_to_disk(config_dir, &config);
+        return config;
     }
 
     let config = AppConfig::default();
@@ -330,10 +329,10 @@ fn effective_injection_mode(config: &AppConfig, session_type: Option<&str>) -> (
         return ("clipboard_only".to_string(), false);
     }
 
-    let ready = match config.injection_strategy.as_str() {
-        "clipboard" | "clipboard_only" | "type_out" => true,
-        _ => false,
-    };
+    let ready = matches!(
+        config.injection_strategy.as_str(),
+        "clipboard" | "clipboard_only" | "type_out"
+    );
 
     (config.injection_strategy.clone(), ready)
 }
@@ -365,9 +364,9 @@ pub(crate) fn configure_pipeline_for_profile(
     let ngram_path = state
         .profile_mgr
         .profile_path(profile_name)
-        .join("ngram.bin");
+        .join("ngram.json");
     state.pipeline.set_ngram_model_path(ngram_path);
-    state.pipeline.reload(&db);
+    state.pipeline.try_reload(&db).map_err(|e| e.to_string())?;
     Ok(db)
 }
 
@@ -484,10 +483,11 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let duration_sec = samples.len() as f64 / 16_000.0;
 
-    let transcriber = match {
+    let transcriber_result = {
         let s = lock_state(&state);
         s.recording.transcriber_handle()
-    } {
+    };
+    let transcriber = match transcriber_result {
         Ok(handle) => handle,
         Err(e) => {
             let mut s = lock_state(&state);
@@ -525,7 +525,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let processing_time_ms = raw_result.processing_time_ms;
 
-    let (corrected, auto_inject, session_id) = match {
+    let correction_result = (|| {
         let mut s = lock_state(&state);
         let session_id = persist_transcription_session(&mut s, &raw_result, duration_sec)?;
         let corrected = s.pipeline.process(&raw_result.full_text);
@@ -535,7 +535,8 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let auto_inject = auto_inject_enabled(&s.config);
         Ok::<_, String>((corrected, auto_inject, session_id))
-    } {
+    })();
+    let (corrected, auto_inject, session_id) = match correction_result {
         Ok(values) => values,
         Err(e) => {
             let mut s = lock_state(&state);
@@ -656,7 +657,7 @@ pub fn clone_profile(
 pub fn get_stats(state: State<'_, Mutex<AppState>>) -> Result<Stats, String> {
     let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.get_stats()),
+        Some(db) => db.get_stats().map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -667,7 +668,7 @@ pub fn get_patterns(
 ) -> Result<Vec<talax_engine::db::CorrectionPattern>, String> {
     let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.get_all_patterns()),
+        Some(db) => db.get_all_patterns().map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -692,7 +693,7 @@ pub fn get_sessions(
 ) -> Result<Vec<SessionSummary>, String> {
     let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.list_sessions(limit)),
+        Some(db) => db.list_sessions(limit).map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -706,6 +707,7 @@ pub fn get_session(
     match &state.db {
         Some(db) => db
             .get_session_detail(&session_id)
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Session '{session_id}' not found")),
         None => Err("No active profile".to_string()),
     }
@@ -742,7 +744,7 @@ pub fn save_corrections(
         .map_err(|e| e.to_string())?;
 
     // Reload the pipeline with updated patterns
-    pipeline.reload(db);
+    pipeline.try_reload(db).map_err(|e| e.to_string())?;
     let _ = app.emit("profile-data-changed", ());
 
     Ok(())
@@ -798,10 +800,10 @@ pub async fn download_model(
 
     // Update recording orchestrator with the new model path
     let mut s = lock_state(&state);
-    if s.config.model == model_id {
-        if let Some(path) = s.model_mgr.get_model_path(&model_id) {
-            s.recording.set_model_path(path);
-        }
+    if s.config.model == model_id
+        && let Some(path) = s.model_mgr.get_model_path(&model_id)
+    {
+        s.recording.set_model_path(path);
     }
 
     // Emit event so frontend can refresh model list
@@ -1017,33 +1019,43 @@ mod tests {
 
     #[test]
     fn config_validation_rejects_invalid_modes_and_ranges() {
-        let mut config = AppConfig::default();
-
-        config.review_mode = "surprise".to_string();
+        let mut config = AppConfig {
+            review_mode: "surprise".to_string(),
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
 
-        config = AppConfig::default();
-        config.injection_strategy = "shell".to_string();
+        config = AppConfig {
+            injection_strategy: "shell".to_string(),
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
 
-        config = AppConfig::default();
-        config.pre_roll_ms = 2_001;
+        config = AppConfig {
+            pre_roll_ms: 2_001,
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
 
-        config = AppConfig::default();
-        config.silence_stop_ms = 3_001;
+        config = AppConfig {
+            silence_stop_ms: 3_001,
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
     }
 
     #[test]
     fn config_validation_rejects_invalid_hotkey_and_profile() {
-        let mut config = AppConfig::default();
-
-        config.hotkey = "Ctrl+DefinitelyNotAKey".to_string();
+        let mut config = AppConfig {
+            hotkey: "Ctrl+DefinitelyNotAKey".to_string(),
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
 
-        config = AppConfig::default();
-        config.active_profile = "../escape".to_string();
+        config = AppConfig {
+            active_profile: "../escape".to_string(),
+            ..Default::default()
+        };
         assert!(validate_config_values(&config).is_err());
     }
 }

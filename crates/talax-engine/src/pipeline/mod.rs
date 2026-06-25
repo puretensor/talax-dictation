@@ -36,6 +36,12 @@ pub struct CorrectionPipeline {
     pub heuristic_expander: HeuristicExpander,
 }
 
+impl Default for CorrectionPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CorrectionPipeline {
     pub fn new() -> Self {
         Self {
@@ -50,16 +56,24 @@ impl CorrectionPipeline {
     }
 
     /// Reload all corrector state from the database/model files.
-    pub fn reload(&mut self, db: &crate::db::Database) {
-        let patterns = db.get_all_patterns();
-        let training_texts = db.get_training_texts();
+    pub fn try_reload(&mut self, db: &crate::db::Database) -> rusqlite::Result<()> {
+        let patterns = db.get_all_patterns()?;
+        let training_texts = db.get_training_texts()?;
 
-        self.dict_corrector.reload(db);
+        self.dict_corrector.try_reload(db)?;
         self.ngram_corrector
             .rebuild_from_training_data(&training_texts, &patterns);
         self.heuristic_expander.reload(db);
         self.heuristic_expander
             .set_word_frequencies(self.ngram_corrector.word_frequencies());
+        Ok(())
+    }
+
+    /// Reload all corrector state from the database/model files.
+    pub fn reload(&mut self, db: &crate::db::Database) {
+        if let Err(err) = self.try_reload(db) {
+            tracing::warn!("failed to reload correction pipeline: {err}");
+        }
     }
 
     /// Run the full correction pipeline on ASR output.

@@ -10,7 +10,7 @@ permissions:
 jobs:
   engine-app-and-ui:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
@@ -36,6 +36,14 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Rust format
         run: cargo fmt --all -- --check
+      - name: Install Rust audit tools
+        run: cargo install --locked cargo-audit cargo-deny
+      - name: Rust dependency audit
+        run: cargo audit
+      - name: Rust dependency policy
+        run: cargo deny check advisories bans sources
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Workspace tests
         run: cargo test --workspace
       - name: Frontend dependencies
@@ -47,6 +55,9 @@ jobs:
       - name: Frontend type check
         working-directory: ui
         run: npm run check
+      - name: Frontend unit tests
+        working-directory: ui
+        run: npm test
       - name: Frontend build
         working-directory: ui
         run: npm run build

@@ -8,7 +8,7 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-talax-engine = { path = "../talax-engine" }
+talax-engine = { path = "../talax-engine", version = "0.3.0" }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

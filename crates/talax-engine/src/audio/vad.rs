@@ -1,9 +1,9 @@
-/// Energy-based Voice Activity Detection.
-///
-/// Uses RMS energy of audio chunks to distinguish speech from silence.
-/// An adaptive noise floor tracks the ambient level, and a configurable
-/// threshold above that floor triggers the Speaking state. State changes
-/// are smoothed: N consecutive frames must agree before a transition fires.
+//! Energy-based Voice Activity Detection.
+//!
+//! Uses RMS energy of audio chunks to distinguish speech from silence.
+//! An adaptive noise floor tracks the ambient level, and a configurable
+//! threshold above that floor triggers the Speaking state. State changes
+//! are smoothed: N consecutive frames must agree before a transition fires.
 
 /// Current state of the voice activity detector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

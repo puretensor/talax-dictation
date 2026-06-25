@@ -53,6 +53,12 @@ pub struct HeuristicExpander {
     word_frequencies: HashMap<String, u32>,
 }
 
+impl Default for HeuristicExpander {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HeuristicExpander {
     pub fn new() -> Self {
         Self {
@@ -156,53 +162,52 @@ impl HeuristicExpander {
             let word_lower = words[i].to_lowercase();
 
             // 2a. Direct accent pattern match
-            if let Some(correct) = self.accent_patterns.get(&word_lower) {
-                if *correct != words[i] {
-                    changes.push(self.make_change(i, &words[i], correct));
-                    words[i] = correct.clone();
-                    i += 1;
-                    continue;
-                }
+            if let Some(correct) = self.accent_patterns.get(&word_lower)
+                && *correct != words[i]
+            {
+                changes.push(self.make_change(i, &words[i], correct));
+                words[i] = correct.clone();
+                i += 1;
+                continue;
             }
 
             // 2b. Compound word splitting: "cpuzero" -> "cpu-node-0"
-            if let Some(correct) = self.compound_forms.get(&word_lower) {
-                if *correct != words[i] {
-                    changes.push(self.make_change(i, &words[i], correct));
-                    words[i] = correct.clone();
-                    i += 1;
-                    continue;
-                }
+            if let Some(correct) = self.compound_forms.get(&word_lower)
+                && *correct != words[i]
+            {
+                changes.push(self.make_change(i, &words[i], correct));
+                words[i] = correct.clone();
+                i += 1;
+                continue;
             }
 
             // 2c. Acronym detection and case fix
-            if let Some(correct) = self.check_acronym(&words[i]) {
-                if correct != words[i] {
-                    changes.push(self.make_change(i, &words[i], &correct));
-                    words[i] = correct;
-                    i += 1;
-                    continue;
-                }
+            if let Some(correct) = self.check_acronym(&words[i])
+                && correct != words[i]
+            {
+                changes.push(self.make_change(i, &words[i], &correct));
+                words[i] = correct;
+                i += 1;
+                continue;
             }
 
             // 2d. Context-aware scored matching against proper nouns
-            if word_lower.len() >= 3 {
-                if let Some(best) = self.best_scored_candidate(&word_lower) {
-                    if best.text != words[i] {
-                        changes.push(self.make_change(i, &words[i], &best.text));
-                        words[i] = best.text;
-                        i += 1;
-                        continue;
-                    }
-                }
+            if word_lower.len() >= 3
+                && let Some(best) = self.best_scored_candidate(&word_lower)
+                && best.text != words[i]
+            {
+                changes.push(self.make_change(i, &words[i], &best.text));
+                words[i] = best.text;
+                i += 1;
+                continue;
             }
 
             // 2e. Case restoration for exact matches
-            if let Some(correct) = self.proper_nouns.get(&word_lower) {
-                if words[i] != *correct {
-                    changes.push(self.make_change(i, &words[i], correct));
-                    words[i] = correct.clone();
-                }
+            if let Some(correct) = self.proper_nouns.get(&word_lower)
+                && words[i] != *correct
+            {
+                changes.push(self.make_change(i, &words[i], correct));
+                words[i] = correct.clone();
             }
 
             i += 1;
@@ -214,10 +219,10 @@ impl HeuristicExpander {
     /// Check if a word is a known acronym that needs case correction.
     fn check_acronym(&self, word: &str) -> Option<String> {
         let lower = word.to_lowercase();
-        if let Some(correct) = self.known_acronyms.get(&lower) {
-            if word != correct.as_str() {
-                return Some(correct.clone());
-            }
+        if let Some(correct) = self.known_acronyms.get(&lower)
+            && word != correct.as_str()
+        {
+            return Some(correct.clone());
         }
         None
     }
@@ -317,24 +322,24 @@ impl HeuristicExpander {
             let w1 = words[i + 1].to_lowercase();
             let w2 = words[i + 2].to_lowercase();
 
-            if w1 == "point" {
-                if let (Some(n0), Some(n2)) = (word_to_digit(&w0), word_to_digit(&w2)) {
-                    let replacement = format!("{n0}.{n2}");
-                    let original = format!("{} {} {}", words[i], words[i + 1], words[i + 2]);
-                    changes.push(Change {
-                        layer: "heuristic".to_string(),
-                        position: Some(i),
-                        original,
-                        corrected: replacement.clone(),
-                        rule_freq: None,
-                        original_score: None,
-                        corrected_score: None,
-                    });
-                    words[i] = replacement;
-                    words.remove(i + 2);
-                    words.remove(i + 1);
-                    continue; // recheck at same position
-                }
+            if w1 == "point"
+                && let (Some(n0), Some(n2)) = (word_to_digit(&w0), word_to_digit(&w2))
+            {
+                let replacement = format!("{n0}.{n2}");
+                let original = format!("{} {} {}", words[i], words[i + 1], words[i + 2]);
+                changes.push(Change {
+                    layer: "heuristic".to_string(),
+                    position: Some(i),
+                    original,
+                    corrected: replacement.clone(),
+                    rule_freq: None,
+                    original_score: None,
+                    corrected_score: None,
+                });
+                words[i] = replacement;
+                words.remove(i + 2);
+                words.remove(i + 1);
+                continue; // recheck at same position
             }
             i += 1;
         }
@@ -345,23 +350,23 @@ impl HeuristicExpander {
             let w0 = words[i].to_lowercase();
             let w1 = words[i + 1].to_lowercase();
 
-            if w0 == "v" || w0 == "version" {
-                if let Some(d) = word_to_digit(&w1) {
-                    let replacement = format!("v{d}");
-                    let original = format!("{} {}", words[i], words[i + 1]);
-                    changes.push(Change {
-                        layer: "heuristic".to_string(),
-                        position: Some(i),
-                        original,
-                        corrected: replacement.clone(),
-                        rule_freq: None,
-                        original_score: None,
-                        corrected_score: None,
-                    });
-                    words[i] = replacement;
-                    words.remove(i + 1);
-                    continue;
-                }
+            if (w0 == "v" || w0 == "version")
+                && let Some(d) = word_to_digit(&w1)
+            {
+                let replacement = format!("v{d}");
+                let original = format!("{} {}", words[i], words[i + 1]);
+                changes.push(Change {
+                    layer: "heuristic".to_string(),
+                    position: Some(i),
+                    original,
+                    corrected: replacement.clone(),
+                    rule_freq: None,
+                    original_score: None,
+                    corrected_score: None,
+                });
+                words[i] = replacement;
+                words.remove(i + 1);
+                continue;
             }
 
             // "dash" between identifiers: "cpu dash node zero" or "node dash n0"
@@ -388,8 +393,7 @@ impl HeuristicExpander {
                         .compound_forms
                         .contains_key(&candidate.to_lowercase().replace('-', ""))
                 {
-                    let original_parts: Vec<String> =
-                        words[i..i + consume_count].iter().cloned().collect();
+                    let original_parts: Vec<String> = words[i..i + consume_count].to_vec();
                     let original = original_parts.join(" ");
                     changes.push(Change {
                         layer: "heuristic".to_string(),
@@ -421,30 +425,30 @@ impl HeuristicExpander {
             let w1 = words[i + 1].to_lowercase();
 
             // Pattern: short alpha token + number word -> merged identifier
-            if is_code_prefix(&w0) {
-                if let Some(d) = word_to_digit(&w1) {
-                    let merged = format!("{}{}", w0, d);
-                    // Only merge if the result is a known proper noun or looks like a code
-                    if self.proper_nouns.contains_key(&merged) || is_likely_identifier(&merged) {
-                        let correct = self
-                            .proper_nouns
-                            .get(&merged)
-                            .cloned()
-                            .unwrap_or_else(|| merged.clone());
-                        let original = format!("{} {}", words[i], words[i + 1]);
-                        changes.push(Change {
-                            layer: "heuristic".to_string(),
-                            position: Some(i),
-                            original,
-                            corrected: correct.clone(),
-                            rule_freq: None,
-                            original_score: None,
-                            corrected_score: None,
-                        });
-                        words[i] = correct;
-                        words.remove(i + 1);
-                        continue;
-                    }
+            if is_code_prefix(&w0)
+                && let Some(d) = word_to_digit(&w1)
+            {
+                let merged = format!("{}{}", w0, d);
+                // Only merge if the result is a known proper noun or looks like a code
+                if self.proper_nouns.contains_key(&merged) || is_likely_identifier(&merged) {
+                    let correct = self
+                        .proper_nouns
+                        .get(&merged)
+                        .cloned()
+                        .unwrap_or_else(|| merged.clone());
+                    let original = format!("{} {}", words[i], words[i + 1]);
+                    changes.push(Change {
+                        layer: "heuristic".to_string(),
+                        position: Some(i),
+                        original,
+                        corrected: correct.clone(),
+                        rule_freq: None,
+                        original_score: None,
+                        corrected_score: None,
+                    });
+                    words[i] = correct;
+                    words.remove(i + 1);
+                    continue;
                 }
             }
 
@@ -801,16 +805,13 @@ pub fn double_metaphone(input: &str) -> MetaphoneResult {
                     pos += if at(pos + 1) == 'G' { 2 } else { 1 };
                 }
             }
-            'H' => {
+            'H'
                 // H only if before a vowel and not after a vowel
-                if is_vowel(at(pos + 1)) && (pos == 0 || !is_vowel(at(pos - 1))) {
+                if is_vowel(at(pos + 1)) && (pos == 0 || !is_vowel(at(pos - 1))) => {
                     primary.push('H');
                     alternate.push('H');
                     pos += 2;
-                } else {
-                    pos += 1;
                 }
-            }
             'J' => {
                 primary.push('J');
                 alternate.push('H'); // Spanish J
@@ -911,15 +912,12 @@ pub fn double_metaphone(input: &str) -> MetaphoneResult {
                 alternate.push('F');
                 pos += if at(pos + 1) == 'V' { 2 } else { 1 };
             }
-            'W' => {
-                if is_vowel(at(pos + 1)) {
+            'W'
+                if is_vowel(at(pos + 1)) => {
                     primary.push('A');
                     alternate.push('F');
                     pos += 1;
-                } else {
-                    pos += 1;
                 }
-            }
             'X' => {
                 primary.push('K');
                 alternate.push('K');

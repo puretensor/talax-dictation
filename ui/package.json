@@ -1,13 +1,14 @@
 {
   "name": "talax-ui",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
@@ -19,6 +20,7 @@
     "svelte": "^5.55.5",
     "svelte-check": "^4.4.6",
     "typescript": "^5",
-    "vite": "^8.1.0"
+    "vite": "^8.1.0",
+    "vitest": "^4.1.9"
   }
 }

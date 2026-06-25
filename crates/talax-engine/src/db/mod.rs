@@ -129,54 +129,26 @@ impl Database {
     }
 
     /// Get auto-apply correction patterns.
-    pub fn get_auto_corrections(&self) -> Vec<CorrectionPattern> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT original, corrected, frequency, confidence, context_before, context_after
-                 FROM correction_patterns WHERE auto_apply = 1
-                 ORDER BY frequency DESC",
-            )
-            .unwrap();
+    pub fn get_auto_corrections(&self) -> SqlResult<Vec<CorrectionPattern>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT original, corrected, frequency, confidence, context_before, context_after
+             FROM correction_patterns WHERE auto_apply = 1
+             ORDER BY frequency DESC",
+        )?;
 
-        stmt.query_map([], |row| {
-            Ok(CorrectionPattern {
-                original: row.get(0)?,
-                corrected: row.get(1)?,
-                frequency: row.get(2)?,
-                confidence: row.get(3)?,
-                context_before: row.get(4)?,
-                context_after: row.get(5)?,
-            })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map([], map_correction_pattern)?
+            .collect::<SqlResult<Vec<_>>>()
     }
 
     /// Get all correction patterns.
-    pub fn get_all_patterns(&self) -> Vec<CorrectionPattern> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT original, corrected, frequency, confidence, context_before, context_after
-                 FROM correction_patterns ORDER BY frequency DESC",
-            )
-            .unwrap();
+    pub fn get_all_patterns(&self) -> SqlResult<Vec<CorrectionPattern>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT original, corrected, frequency, confidence, context_before, context_after
+             FROM correction_patterns ORDER BY frequency DESC",
+        )?;
 
-        stmt.query_map([], |row| {
-            Ok(CorrectionPattern {
-                original: row.get(0)?,
-                corrected: row.get(1)?,
-                frequency: row.get(2)?,
-                confidence: row.get(3)?,
-                context_before: row.get(4)?,
-                context_after: row.get(5)?,
-            })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map([], map_correction_pattern)?
+            .collect::<SqlResult<Vec<_>>>()
     }
 
     /// Load domain context from JSON file.
@@ -346,21 +318,16 @@ impl Database {
     }
 
     /// Training texts derived from accepted reviewed output.
-    pub fn get_training_texts(&self) -> Vec<String> {
-        let mut stmt = match self.conn.prepare(
+    pub fn get_training_texts(&self) -> SqlResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
             "SELECT corrected_text
              FROM segments
              WHERE reviewed = 1 AND corrected_text IS NOT NULL
              ORDER BY id ASC",
-        ) {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        };
+        )?;
 
-        match stmt.query_map([], |row| row.get::<_, String>(0)) {
-            Ok(rows) => rows.filter_map(Result::ok).collect(),
-            Err(_) => Vec::new(),
-        }
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()
     }
 
     /// Rebuild auto_apply flags based on frequency and confidence thresholds.
@@ -421,16 +388,13 @@ impl Database {
     }
 
     /// List sessions ordered by creation time (most recent first).
-    pub fn list_sessions(&self, limit: usize) -> Vec<SessionSummary> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT s.id, s.created_at, s.duration_sec, s.total_segments, s.reviewed
-                 FROM sessions s
-                 ORDER BY s.created_at DESC
-                 LIMIT ?1",
-            )
-            .unwrap();
+    pub fn list_sessions(&self, limit: usize) -> SqlResult<Vec<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.created_at, s.duration_sec, s.total_segments, s.reviewed
+             FROM sessions s
+             ORDER BY s.created_at DESC
+             LIMIT ?1",
+        )?;
 
         stmt.query_map(params![limit as i64], |row| {
             let reviewed_int: i64 = row.get(4)?;
@@ -441,33 +405,29 @@ impl Database {
                 segment_count: row.get(3)?,
                 reviewed: reviewed_int != 0,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        })?
+        .collect::<SqlResult<Vec<_>>>()
     }
 
     /// Get full session detail including all segments.
-    pub fn get_session_detail(&self, session_id: &str) -> Option<SessionDetail> {
-        let session: Option<(String, String, f64, String)> = self
-            .conn
-            .query_row(
-                "SELECT id, COALESCE(created_at, ''), duration_sec, COALESCE(whisper_model, 'unknown')
-                 FROM sessions WHERE id = ?1",
-                params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok();
+    pub fn get_session_detail(&self, session_id: &str) -> SqlResult<Option<SessionDetail>> {
+        let session = match self.conn.query_row(
+            "SELECT id, COALESCE(created_at, ''), duration_sec, COALESCE(whisper_model, 'unknown')
+             FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ) {
+            Ok(session) => session,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(err) => return Err(err),
+        };
 
-        let (id, created_at, duration, whisper_model) = session?;
+        let (id, created_at, duration, whisper_model) = session;
 
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT segment_index, original_text, corrected_text, start_time, end_time, reviewed
-                 FROM segments WHERE session_id = ?1 ORDER BY segment_index ASC",
-            )
-            .unwrap();
+        let mut stmt = self.conn.prepare(
+            "SELECT segment_index, original_text, corrected_text, start_time, end_time, reviewed
+             FROM segments WHERE session_id = ?1 ORDER BY segment_index ASC",
+        )?;
 
         let segments: Vec<SegmentDetail> = stmt
             .query_map(params![session_id], |row| {
@@ -480,45 +440,49 @@ impl Database {
                     end_time: row.get(4)?,
                     reviewed: reviewed_int != 0,
                 })
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
 
-        Some(SessionDetail {
+        Ok(Some(SessionDetail {
             id,
             created_at,
             duration,
             whisper_model,
             segments,
-        })
+        }))
     }
 
     /// Get basic statistics.
-    pub fn get_stats(&self) -> Stats {
+    pub fn get_stats(&self) -> SqlResult<Stats> {
         let session_count: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
-            .unwrap_or(0);
-        let pattern_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM correction_patterns", [], |r| r.get(0))
-            .unwrap_or(0);
-        let auto_count: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM correction_patterns WHERE auto_apply = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+        let pattern_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM correction_patterns", [], |r| r.get(0))?;
+        let auto_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM correction_patterns WHERE auto_apply = 1",
+            [],
+            |r| r.get(0),
+        )?;
 
-        Stats {
+        Ok(Stats {
             session_count,
             pattern_count,
             auto_apply_count: auto_count,
-        }
+        })
     }
+}
+
+fn map_correction_pattern(row: &rusqlite::Row<'_>) -> SqlResult<CorrectionPattern> {
+    Ok(CorrectionPattern {
+        original: row.get(0)?,
+        corrected: row.get(1)?,
+        frequency: row.get(2)?,
+        confidence: row.get(3)?,
+        context_before: row.get(4)?,
+        context_after: row.get(5)?,
+    })
 }
 
 /// Summary of a dictation session (for list views).
@@ -581,8 +545,8 @@ fn align_word_sequences<'a>(
     for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
         row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, cell) in dp[0].iter_mut().enumerate().take(n + 1) {
+        *cell = j;
     }
 
     for i in 1..=m {
@@ -641,8 +605,26 @@ mod tests {
     #[test]
     fn test_open_memory() {
         let db = Database::open_memory().unwrap();
-        let stats = db.get_stats();
+        let stats = db.get_stats().unwrap();
         assert_eq!(stats.session_count, 0);
+    }
+
+    #[test]
+    fn fallible_read_apis_surface_schema_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY);")
+            .unwrap();
+        let db = Database {
+            conn,
+            domain_context_path: None,
+        };
+
+        assert!(db.get_stats().is_err());
+        assert!(db.get_all_patterns().is_err());
+        assert!(db.get_auto_corrections().is_err());
+        assert!(db.list_sessions(10).is_err());
+        assert!(db.get_session_detail("sess1").is_err());
+        assert!(db.get_training_texts().is_err());
     }
 
     #[test]
@@ -651,7 +633,7 @@ mod tests {
         db.create_session("test1", "/tmp/test.wav", 5.0).unwrap();
         db.add_segments("test1", &[(0.0, 2.5, "hello world"), (2.5, 5.0, "foo bar")])
             .unwrap();
-        let stats = db.get_stats();
+        let stats = db.get_stats().unwrap();
         assert_eq!(stats.session_count, 1);
     }
 
@@ -711,7 +693,10 @@ mod tests {
         db.save_corrections("sess1", &[(0, "the quick fox")])
             .unwrap();
 
-        assert_eq!(db.get_training_texts(), vec!["the quick fox".to_string()]);
+        assert_eq!(
+            db.get_training_texts().unwrap(),
+            vec!["the quick fox".to_string()]
+        );
     }
 
     #[test]
@@ -723,14 +708,14 @@ mod tests {
         db.stage_corrections("sess1", &[(0, "the quick fox")])
             .unwrap();
 
-        let detail = db.get_session_detail("sess1").unwrap();
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
         assert_eq!(
             detail.segments[0].corrected_text.as_deref(),
             Some("the quick fox")
         );
         assert!(!detail.segments[0].reviewed);
 
-        let sessions = db.list_sessions(10);
+        let sessions = db.list_sessions(10).unwrap();
         assert!(!sessions[0].reviewed);
     }
 }

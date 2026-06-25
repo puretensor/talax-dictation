@@ -29,19 +29,15 @@ pub enum InjectionError {
 /// How injected text reaches the target application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum InjectionMode {
     /// Copy text to clipboard, then simulate Ctrl+V (Cmd+V on macOS).
+    #[default]
     Clipboard,
     /// Simulate individual keystrokes (slower but broader compatibility).
     TypeOut,
     /// Copy text to clipboard without pasting (safe fallback).
     ClipboardOnly,
-}
-
-impl Default for InjectionMode {
-    fn default() -> Self {
-        Self::Clipboard
-    }
 }
 
 // ---------------------------------------------------------------------------

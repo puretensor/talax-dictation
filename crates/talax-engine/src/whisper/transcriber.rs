@@ -29,7 +29,7 @@ pub enum TranscriberError {
 // ---------------------------------------------------------------------------
 
 /// Parameters controlling a single transcription run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TranscribeParams {
     /// Language code (e.g. `"en"`). `None` = auto-detect.
     pub language: Option<String>,
@@ -40,17 +40,6 @@ pub struct TranscribeParams {
     pub n_threads: Option<i32>,
     /// Print progress percentage to stderr via whisper.cpp.
     pub print_progress: bool,
-}
-
-impl Default for TranscribeParams {
-    fn default() -> Self {
-        Self {
-            language: None,
-            translate: false,
-            n_threads: None,
-            print_progress: false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +137,7 @@ impl Transcriber {
         full_params.set_print_timestamps(false);
 
         // Thread count: use caller value, or auto-select from available CPUs.
-        let n_threads = params.n_threads.unwrap_or_else(|| default_thread_count());
+        let n_threads = params.n_threads.unwrap_or_else(default_thread_count);
         full_params.set_n_threads(n_threads);
 
         // -- create state & run ----------------------------------------------
