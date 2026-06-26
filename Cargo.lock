@@ -3909,7 +3909,7 @@ dependencies = [
  "talax-engine",
  "tauri",
  "tauri-build",
- "toml 0.8.2",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
 ]
 
