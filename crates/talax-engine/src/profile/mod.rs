@@ -2,13 +2,15 @@
 //!
 //! Each profile is a directory containing:
 //! - corrections.db (SQLite)
-//! - ngram.bin (bincode-serialized n-gram model)
+//! - ngram.json (serde_json-serialized n-gram cache)
 //! - domain_context.json (vocabulary)
 //! - profile.toml (metadata)
 
 use std::path::{Path, PathBuf};
 
 use crate::db::Database;
+
+const DB_FILE: &str = "corrections.db";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProfileMetadata {
@@ -147,16 +149,10 @@ impl ProfileManager {
         if dst.exists() {
             return Err(format!("Target profile '{target}' already exists"));
         }
-        copy_dir_recursive(&src, &dst).map_err(|e| e.to_string())?;
 
-        // Update the name in profile.toml
-        let toml_path = dst.join("profile.toml");
-        if let Ok(contents) = std::fs::read_to_string(&toml_path) {
-            let updated = contents.replace(
-                &format!("name = \"{source}\""),
-                &format!("name = \"{target}\""),
-            );
-            std::fs::write(&toml_path, updated).ok();
+        if let Err(err) = clone_profile_contents(&src, &dst, source, target) {
+            let _ = std::fs::remove_dir_all(&dst);
+            return Err(err);
         }
 
         Ok(dst)
@@ -188,6 +184,75 @@ impl ProfileManager {
     }
 }
 
+fn clone_profile_contents(
+    src: &Path,
+    dst: &Path,
+    source: &str,
+    target: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+
+        if name == format!("{DB_FILE}-wal") || name == format!("{DB_FILE}-shm") {
+            continue;
+        }
+
+        let source_path = entry.path();
+        let target_path = dst.join(&file_name);
+
+        if ty.is_dir() {
+            copy_dir_recursive(&source_path, &target_path).map_err(|e| e.to_string())?;
+        } else if ty.is_file() && name == DB_FILE {
+            clone_sqlite_database(&source_path, &target_path)?;
+        } else if ty.is_file() {
+            std::fs::copy(&source_path, &target_path).map_err(|e| e.to_string())?;
+        } else {
+            return Err(format!(
+                "Profile '{source}' contains unsupported entry '{}'",
+                source_path.display()
+            ));
+        }
+    }
+
+    if !dst.join(DB_FILE).exists() {
+        Database::open(&dst.join(DB_FILE)).map_err(|e| e.to_string())?;
+    }
+
+    update_profile_metadata_name(&dst.join("profile.toml"), source, target)?;
+
+    Ok(())
+}
+
+fn clone_sqlite_database(src: &Path, dst: &Path) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(src).map_err(|e| e.to_string())?;
+    let dst = dst
+        .to_str()
+        .ok_or_else(|| format!("Database path is not valid UTF-8: {}", dst.display()))?;
+    conn.execute("VACUUM INTO ?1", [dst])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn update_profile_metadata_name(
+    toml_path: &Path,
+    source: &str,
+    target: &str,
+) -> Result<(), String> {
+    let Ok(contents) = std::fs::read_to_string(toml_path) else {
+        return Ok(());
+    };
+    let updated = contents.replace(
+        &format!("name = \"{source}\""),
+        &format!("name = \"{target}\""),
+    );
+    std::fs::write(toml_path, updated).map_err(|e| e.to_string())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -196,8 +261,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         let target = dst.join(entry.file_name());
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &target)?;
-        } else {
+        } else if ty.is_file() {
             std::fs::copy(entry.path(), target)?;
+        } else {
+            return Err(std::io::Error::other(format!(
+                "unsupported profile entry: {}",
+                entry.path().display()
+            )));
         }
     }
     Ok(())

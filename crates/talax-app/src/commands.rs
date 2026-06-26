@@ -1,8 +1,8 @@
 //! Tauri IPC command handlers.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use talax_engine::db::{Database, SessionDetail, SessionSummary, Stats};
 use talax_engine::hotkey::{HotkeyEvent, HotkeyHandle, HotkeyListener, parse_hotkey};
 use talax_engine::inject::InjectionMode;
 use talax_engine::pipeline::CorrectionPipeline;
-use talax_engine::profile::ProfileManager;
+use talax_engine::profile::{ProfileManager, is_valid_profile_name};
 use talax_engine::whisper::model_manager::ModelManager;
 use talax_engine::whisper::transcriber::TranscribeParams;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -103,6 +103,13 @@ pub struct AppState {
     pub hotkey_handle: Option<HotkeyHandle>,
 }
 
+fn lock_state(state: &Mutex<AppState>) -> MutexGuard<'_, AppState> {
+    state.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("application state mutex was poisoned; recovering inner state");
+        poisoned.into_inner()
+    })
+}
+
 impl AppState {
     pub fn new(
         profile_mgr: ProfileManager,
@@ -127,10 +134,10 @@ impl AppState {
         );
 
         // Set model path if downloaded
-        if let Some(path) = model_mgr.get_model_path(&config.model) {
-            if path.exists() {
-                recording.set_model_path(path);
-            }
+        if let Some(path) = model_mgr.get_model_path(&config.model)
+            && path.exists()
+        {
+            recording.set_model_path(path);
         }
 
         Self {
@@ -174,21 +181,20 @@ fn parse_config(contents: &str) -> Option<AppConfig> {
 /// Load config from disk, or create a default one if missing.
 pub fn load_or_create_config(config_dir: &Path) -> AppConfig {
     let path = config_path(config_dir);
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        if let Some(config) = parse_config(&contents) {
-            let _ = save_config_to_disk(config_dir, &config);
-            return config;
-        }
+    if let Ok(contents) = std::fs::read_to_string(&path)
+        && let Some(config) = parse_config(&contents)
+    {
+        let _ = save_config_to_disk(config_dir, &config);
+        return config;
     }
 
     let legacy_path = legacy_config_path();
-    if legacy_path != path {
-        if let Ok(contents) = std::fs::read_to_string(&legacy_path) {
-            if let Some(config) = parse_config(&contents) {
-                let _ = save_config_to_disk(config_dir, &config);
-                return config;
-            }
-        }
+    if legacy_path != path
+        && let Ok(contents) = std::fs::read_to_string(&legacy_path)
+        && let Some(config) = parse_config(&contents)
+    {
+        let _ = save_config_to_disk(config_dir, &config);
+        return config;
     }
 
     let config = AppConfig::default();
@@ -255,6 +261,38 @@ fn auto_inject_enabled(config: &AppConfig) -> bool {
     config.review_mode == "auto_inject"
 }
 
+fn validate_config_values(config: &AppConfig) -> Result<(), String> {
+    parse_hotkey(&config.hotkey).map_err(|e| format!("invalid hotkey: {e}"))?;
+
+    if !matches!(config.review_mode.as_str(), "auto_inject" | "review_first") {
+        return Err(format!("invalid review_mode: {}", config.review_mode));
+    }
+
+    if !matches!(
+        config.injection_strategy.as_str(),
+        "clipboard" | "clipboard_only" | "type_out"
+    ) {
+        return Err(format!(
+            "invalid injection_strategy: {}",
+            config.injection_strategy
+        ));
+    }
+
+    if !is_valid_profile_name(&config.active_profile) {
+        return Err(format!("invalid active_profile: {}", config.active_profile));
+    }
+
+    if config.pre_roll_ms > 2_000 {
+        return Err("pre_roll_ms must be between 0 and 2000".to_string());
+    }
+
+    if config.silence_stop_ms > 3_000 {
+        return Err("silence_stop_ms must be between 0 and 3000".to_string());
+    }
+
+    Ok(())
+}
+
 fn platform_name() -> String {
     if cfg!(target_os = "macos") {
         "macos".to_string()
@@ -291,10 +329,10 @@ fn effective_injection_mode(config: &AppConfig, session_type: Option<&str>) -> (
         return ("clipboard_only".to_string(), false);
     }
 
-    let ready = match config.injection_strategy.as_str() {
-        "clipboard" | "clipboard_only" | "type_out" => true,
-        _ => false,
-    };
+    let ready = matches!(
+        config.injection_strategy.as_str(),
+        "clipboard" | "clipboard_only" | "type_out"
+    );
 
     (config.injection_strategy.clone(), ready)
 }
@@ -326,9 +364,9 @@ pub(crate) fn configure_pipeline_for_profile(
     let ngram_path = state
         .profile_mgr
         .profile_path(profile_name)
-        .join("ngram.bin");
+        .join("ngram.json");
     state.pipeline.set_ngram_model_path(ngram_path);
-    state.pipeline.reload(&db);
+    state.pipeline.try_reload(&db).map_err(|e| e.to_string())?;
     Ok(db)
 }
 
@@ -359,13 +397,13 @@ pub(crate) fn install_hotkey_listener(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<AppState>>();
 
     let hotkey = {
-        let state = state.lock().unwrap();
+        let state = lock_state(&state);
         state.config.hotkey.clone()
     };
     let config = parse_hotkey(&hotkey).map_err(|e| e.to_string())?;
 
     let previous_handle = {
-        let mut state = state.lock().unwrap();
+        let mut state = lock_state(&state);
         state.hotkey_handle.take()
     };
 
@@ -391,14 +429,14 @@ pub(crate) fn install_hotkey_listener(app: &AppHandle) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
 
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(&state);
     state.hotkey_handle = Some(handle);
     Ok(())
 }
 
 fn start_recording_impl(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<AppState>>();
-    let mut s = state.lock().unwrap();
+    let mut s = lock_state(&state);
     if !s.recording.is_model_loaded() {
         drop(s);
         emit_recording_state(
@@ -422,7 +460,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     // Stop recording and get samples (short lock)
     let samples = {
-        let mut s = state.lock().unwrap();
+        let mut s = lock_state(&state);
         s.recording.stop_recording()?
     };
 
@@ -433,7 +471,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     );
 
     if samples.is_empty() {
-        let mut s = state.lock().unwrap();
+        let mut s = lock_state(&state);
         s.recording.set_idle();
         emit_recording_state(
             &app,
@@ -445,13 +483,14 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let duration_sec = samples.len() as f64 / 16_000.0;
 
-    let transcriber = match {
-        let s = state.lock().unwrap();
+    let transcriber_result = {
+        let s = lock_state(&state);
         s.recording.transcriber_handle()
-    } {
+    };
+    let transcriber = match transcriber_result {
         Ok(handle) => handle,
         Err(e) => {
-            let mut s = state.lock().unwrap();
+            let mut s = lock_state(&state);
             s.recording.set_idle();
             drop(s);
             emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
@@ -476,7 +515,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     let raw_result = match raw_result {
         Ok(r) => r,
         Err(e) => {
-            let mut s = state.lock().unwrap();
+            let mut s = lock_state(&state);
             s.recording.set_idle();
             drop(s);
             emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
@@ -486,8 +525,8 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let processing_time_ms = raw_result.processing_time_ms;
 
-    let (corrected, auto_inject, session_id) = match {
-        let mut s = state.lock().unwrap();
+    let correction_result = (|| {
+        let mut s = lock_state(&state);
         let session_id = persist_transcription_session(&mut s, &raw_result, duration_sec)?;
         let corrected = s.pipeline.process(&raw_result.full_text);
         s.db.as_ref()
@@ -496,10 +535,11 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let auto_inject = auto_inject_enabled(&s.config);
         Ok::<_, String>((corrected, auto_inject, session_id))
-    } {
+    })();
+    let (corrected, auto_inject, session_id) = match correction_result {
         Ok(values) => values,
         Err(e) => {
-            let mut s = state.lock().unwrap();
+            let mut s = lock_state(&state);
             s.recording.set_idle();
             drop(s);
             emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
@@ -523,7 +563,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
         emit_recording_state(&app, RecordingState::Injecting, None);
 
         let inject_result = {
-            let s = state.lock().unwrap();
+            let s = lock_state(&state);
             s.recording.inject_text(&corrected.corrected)
         };
 
@@ -533,7 +573,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     }
 
     {
-        let mut s = state.lock().unwrap();
+        let mut s = lock_state(&state);
         s.recording.set_idle();
     }
 
@@ -548,13 +588,13 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_profiles(state: State<'_, Mutex<AppState>>) -> Vec<String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.profile_mgr.list_profiles()
 }
 
 #[tauri::command]
 pub fn create_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<String, String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state
         .profile_mgr
         .create_profile(&name)
@@ -563,7 +603,7 @@ pub fn create_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result
 
 #[tauri::command]
 pub fn switch_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(&state);
     let db = configure_pipeline_for_profile(&mut state, &name)?;
     state.profile_mgr.set_active(&name);
     state.active_profile = name.clone();
@@ -576,7 +616,7 @@ pub fn switch_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result
 
 #[tauri::command]
 pub fn delete_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<(), String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     if name == state.active_profile {
         return Err("Cannot delete the active profile".to_string());
     }
@@ -585,7 +625,7 @@ pub fn delete_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result
 
 #[tauri::command]
 pub fn reset_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(&state);
     state.profile_mgr.reset_profile(&name).map(|_| ())?;
     // If this was the active profile, reopen its database and reload pipeline
     if name == state.active_profile {
@@ -602,7 +642,7 @@ pub fn clone_profile(
     source: String,
     target: String,
 ) -> Result<(), String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state
         .profile_mgr
         .clone_profile(&source, &target)
@@ -615,9 +655,9 @@ pub fn clone_profile(
 
 #[tauri::command]
 pub fn get_stats(state: State<'_, Mutex<AppState>>) -> Result<Stats, String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.get_stats()),
+        Some(db) => db.get_stats().map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -626,9 +666,9 @@ pub fn get_stats(state: State<'_, Mutex<AppState>>) -> Result<Stats, String> {
 pub fn get_patterns(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<Vec<talax_engine::db::CorrectionPattern>, String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.get_all_patterns()),
+        Some(db) => db.get_all_patterns().map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -638,7 +678,7 @@ pub fn correct_text(
     state: State<'_, Mutex<AppState>>,
     text: String,
 ) -> talax_engine::pipeline::PipelineResult {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.pipeline.process(&text)
 }
 
@@ -651,9 +691,9 @@ pub fn get_sessions(
     state: State<'_, Mutex<AppState>>,
     limit: usize,
 ) -> Result<Vec<SessionSummary>, String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     match &state.db {
-        Some(db) => Ok(db.list_sessions(limit)),
+        Some(db) => db.list_sessions(limit).map_err(|e| e.to_string()),
         None => Err("No active profile".to_string()),
     }
 }
@@ -663,10 +703,11 @@ pub fn get_session(
     state: State<'_, Mutex<AppState>>,
     session_id: String,
 ) -> Result<SessionDetail, String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     match &state.db {
         Some(db) => db
             .get_session_detail(&session_id)
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Session '{session_id}' not found")),
         None => Err("No active profile".to_string()),
     }
@@ -679,7 +720,7 @@ pub fn save_corrections(
     session_id: String,
     corrections: Vec<CorrectionInput>,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(&state);
 
     // Convert to the format the engine expects
     let correction_refs: Vec<(usize, String)> = corrections
@@ -703,7 +744,7 @@ pub fn save_corrections(
         .map_err(|e| e.to_string())?;
 
     // Reload the pipeline with updated patterns
-    pipeline.reload(db);
+    pipeline.try_reload(db).map_err(|e| e.to_string())?;
     let _ = app.emit("profile-data-changed", ());
 
     Ok(())
@@ -715,7 +756,7 @@ pub fn save_corrections(
 
 #[tauri::command]
 pub fn get_available_models(state: State<'_, Mutex<AppState>>) -> Vec<ModelInfo> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state
         .model_mgr
         .list_available()
@@ -736,7 +777,7 @@ pub async fn download_model(
     model_id: String,
 ) -> Result<(), String> {
     let models_dir = {
-        let s = state.lock().unwrap();
+        let s = lock_state(&state);
         s.app_dir.join("models")
     };
 
@@ -758,11 +799,11 @@ pub async fn download_model(
     result.map_err(|e| e.to_string())?;
 
     // Update recording orchestrator with the new model path
-    let mut s = state.lock().unwrap();
-    if s.config.model == model_id {
-        if let Some(path) = s.model_mgr.get_model_path(&model_id) {
-            s.recording.set_model_path(path);
-        }
+    let mut s = lock_state(&state);
+    if s.config.model == model_id
+        && let Some(path) = s.model_mgr.get_model_path(&model_id)
+    {
+        s.recording.set_model_path(path);
     }
 
     // Emit event so frontend can refresh model list
@@ -777,13 +818,13 @@ pub async fn download_model(
 
 #[tauri::command]
 pub fn get_recording_status(state: State<'_, Mutex<AppState>>) -> RecordingState {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.recording.state()
 }
 
 #[tauri::command]
 pub fn is_model_ready(state: State<'_, Mutex<AppState>>) -> bool {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.recording.is_model_loaded()
 }
 
@@ -794,7 +835,7 @@ pub async fn load_whisper_model(
 ) -> Result<(), String> {
     // Check if already loaded
     {
-        let s = state.lock().unwrap();
+        let s = lock_state(&state);
         if s.recording.is_model_loaded() {
             return Ok(());
         }
@@ -803,7 +844,7 @@ pub async fn load_whisper_model(
     // Load model in a blocking task
     // We need to extract the model path, load outside the lock, then store
     let model_path = {
-        let s = state.lock().unwrap();
+        let s = lock_state(&state);
         let model_id = &s.config.model;
         s.model_mgr
             .get_model_path(model_id)
@@ -825,7 +866,7 @@ pub async fn load_whisper_model(
 
     // Store the already-loaded model inside the lock.
     {
-        let mut s = state.lock().unwrap();
+        let mut s = lock_state(&state);
         s.recording.set_model_path(model_path);
         s.recording.set_loaded_transcriber(transcriber);
     }
@@ -849,7 +890,7 @@ pub async fn stop_recording(
 
 #[tauri::command]
 pub fn inject_review_text(state: State<'_, Mutex<AppState>>, text: String) -> Result<(), String> {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.recording.inject_text(&text)
 }
 
@@ -859,13 +900,13 @@ pub fn inject_review_text(state: State<'_, Mutex<AppState>>, text: String) -> Re
 
 #[tauri::command]
 pub fn get_app_config(state: State<'_, Mutex<AppState>>) -> AppConfig {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     state.config.clone()
 }
 
 #[tauri::command]
 pub fn get_runtime_diagnostics(state: State<'_, Mutex<AppState>>) -> RuntimeDiagnostics {
-    let state = state.lock().unwrap();
+    let state = lock_state(&state);
     let session = session_type();
     let (injection_mode_effective, injection_ready) =
         effective_injection_mode(&state.config, session.as_deref());
@@ -922,15 +963,23 @@ pub fn save_app_config(
     state: State<'_, Mutex<AppState>>,
     config: AppConfig,
 ) -> Result<(), String> {
+    validate_config_values(&config)?;
+
     let config_dir = {
-        let state = state.lock().unwrap();
+        let state = lock_state(&state);
+        if state.model_mgr.get_model_path(&config.model).is_none() {
+            return Err(format!("unknown model: {}", config.model));
+        }
+        if config.active_profile != state.active_profile {
+            return Err("active_profile must be changed with switch_profile".to_string());
+        }
         state.config_dir.clone()
     };
     save_config_to_disk(&config_dir, &config)?;
 
     let restart_hotkey;
     {
-        let mut state = state.lock().unwrap();
+        let mut state = lock_state(&state);
         restart_hotkey = config.hotkey != state.config.hotkey;
 
         state
@@ -957,4 +1006,56 @@ pub fn save_app_config(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_validation_accepts_default_config() {
+        validate_config_values(&AppConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_modes_and_ranges() {
+        let mut config = AppConfig {
+            review_mode: "surprise".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+
+        config = AppConfig {
+            injection_strategy: "shell".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+
+        config = AppConfig {
+            pre_roll_ms: 2_001,
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+
+        config = AppConfig {
+            silence_stop_ms: 3_001,
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_hotkey_and_profile() {
+        let mut config = AppConfig {
+            hotkey: "Ctrl+DefinitelyNotAKey".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+
+        config = AppConfig {
+            active_profile: "../escape".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_config_values(&config).is_err());
+    }
 }

@@ -141,7 +141,7 @@ impl ChunkProcessor {
 
         if matches!(vad_state, VadState::Speaking | VadState::Transition) {
             if !self.trailing_silence.is_empty() {
-                output.extend(self.trailing_silence.drain(..));
+                output.append(&mut self.trailing_silence);
             }
             output.extend_from_slice(chunk);
             return;

@@ -95,45 +95,47 @@ fn u16_to_i16(sample: u16) -> i16 {
 }
 
 #[cfg(not(test))]
-fn process_captured_chunk(
-    data: &[i16],
+struct CapturedChunkSink<'a> {
     device_channels: usize,
     device_rate: u32,
     target_rate: u32,
     chunk_samples: usize,
-    pending: &Arc<Mutex<Vec<i16>>>,
-    acc_tx: &Sender<Vec<i16>>,
-    chunk_tx: &Sender<Vec<i16>>,
-) {
+    pending: &'a Arc<Mutex<Vec<i16>>>,
+    acc_tx: &'a Sender<Vec<i16>>,
+    chunk_tx: &'a Sender<Vec<i16>>,
+}
+
+#[cfg(not(test))]
+fn process_captured_chunk(data: &[i16], sink: &CapturedChunkSink<'_>) {
     // Downmix to mono if needed.
-    let mono: Vec<i16> = if device_channels == 1 {
+    let mono: Vec<i16> = if sink.device_channels == 1 {
         data.to_vec()
     } else {
-        data.chunks(device_channels)
+        data.chunks(sink.device_channels)
             .map(|frame| {
                 let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                (sum / device_channels as i32) as i16
+                (sum / sink.device_channels as i32) as i16
             })
             .collect()
     };
 
     // Resample if needed.
-    let resampled = if device_rate != target_rate {
-        resample_linear(&mono, device_rate, target_rate)
+    let resampled = if sink.device_rate != sink.target_rate {
+        resample_linear(&mono, sink.device_rate, sink.target_rate)
     } else {
         mono
     };
 
-    let mut pending = match pending.lock() {
+    let mut pending = match sink.pending.lock() {
         Ok(guard) => guard,
         Err(_) => return,
     };
     pending.extend_from_slice(&resampled);
 
-    while pending.len() >= chunk_samples {
-        let chunk: Vec<i16> = pending.drain(..chunk_samples).collect();
-        let _ = acc_tx.send(chunk.clone());
-        let _ = chunk_tx.send(chunk);
+    while pending.len() >= sink.chunk_samples {
+        let chunk: Vec<i16> = pending.drain(..sink.chunk_samples).collect();
+        let _ = sink.acc_tx.send(chunk.clone());
+        let _ = sink.chunk_tx.send(chunk);
     }
 }
 
@@ -319,16 +321,16 @@ impl AudioRecorder {
                             if !running.load(Ordering::Relaxed) {
                                 return;
                             }
-                            process_captured_chunk(
-                                data,
+                            let sink = CapturedChunkSink {
                                 device_channels,
                                 device_rate,
-                                target_rate_val,
+                                target_rate: target_rate_val,
                                 chunk_samples,
-                                &pending,
-                                &acc_tx,
-                                &chunk_tx,
-                            );
+                                pending: &pending,
+                                acc_tx: &acc_tx,
+                                chunk_tx: &chunk_tx,
+                            };
+                            process_captured_chunk(data, &sink);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);
@@ -351,16 +353,16 @@ impl AudioRecorder {
                             }
                             let converted: Vec<i16> =
                                 data.iter().copied().map(u16_to_i16).collect();
-                            process_captured_chunk(
-                                &converted,
+                            let sink = CapturedChunkSink {
                                 device_channels,
                                 device_rate,
-                                target_rate_val,
+                                target_rate: target_rate_val,
                                 chunk_samples,
-                                &pending,
-                                &acc_tx,
-                                &chunk_tx,
-                            );
+                                pending: &pending,
+                                acc_tx: &acc_tx,
+                                chunk_tx: &chunk_tx,
+                            };
+                            process_captured_chunk(&converted, &sink);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);
@@ -383,16 +385,16 @@ impl AudioRecorder {
                             }
                             let converted: Vec<i16> =
                                 data.iter().copied().map(f32_to_i16).collect();
-                            process_captured_chunk(
-                                &converted,
+                            let sink = CapturedChunkSink {
                                 device_channels,
                                 device_rate,
-                                target_rate_val,
+                                target_rate: target_rate_val,
                                 chunk_samples,
-                                &pending,
-                                &acc_tx,
-                                &chunk_tx,
-                            );
+                                pending: &pending,
+                                acc_tx: &acc_tx,
+                                chunk_tx: &chunk_tx,
+                            };
+                            process_captured_chunk(&converted, &sink);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);

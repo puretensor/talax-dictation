@@ -5,6 +5,7 @@
 //! Port of /opt/dictation/server/dict_corrector.py
 
 use regex::Regex;
+use rusqlite::Result as SqlResult;
 
 use super::Change;
 
@@ -23,14 +24,19 @@ pub struct DictionaryCorrector {
     rules: Vec<SubstitutionRule>,
 }
 
+impl Default for DictionaryCorrector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DictionaryCorrector {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
     }
 
-    /// Reload rules from the database.
-    pub fn reload(&mut self, db: &crate::db::Database) {
-        let patterns = db.get_auto_corrections();
+    pub fn try_reload(&mut self, db: &crate::db::Database) -> SqlResult<()> {
+        let patterns = db.get_auto_corrections()?;
         self.rules = patterns
             .into_iter()
             .map(|p| {
@@ -49,7 +55,17 @@ impl DictionaryCorrector {
 
         // Sort longest-first to prevent shorter patterns interfering
         self.rules
-            .sort_by(|a, b| b.original.len().cmp(&a.original.len()));
+            .sort_by_key(|rule| std::cmp::Reverse(rule.original.len()));
+
+        Ok(())
+    }
+
+    /// Reload rules from the database.
+    pub fn reload(&mut self, db: &crate::db::Database) {
+        if let Err(err) = self.try_reload(db) {
+            tracing::warn!("failed to reload dictionary corrector: {err}");
+            self.rules.clear();
+        }
     }
 
     /// Apply dictionary substitutions. Returns (corrected_text, changes).
@@ -182,14 +198,15 @@ fn case_match(original: &str, replacement: &str) -> String {
         return replacement.to_uppercase();
     }
     let mut chars = original.chars();
-    if let Some(first) = chars.next() {
-        if first.is_uppercase() && chars.all(|c| c.is_lowercase() || !c.is_alphabetic()) {
-            let mut r = replacement.to_string();
-            if let Some(c) = r.get_mut(0..1) {
-                c.make_ascii_uppercase();
-            }
-            return r;
+    if let Some(first) = chars.next()
+        && first.is_uppercase()
+        && chars.all(|c| c.is_lowercase() || !c.is_alphabetic())
+    {
+        let mut r = replacement.to_string();
+        if let Some(c) = r.get_mut(0..1) {
+            c.make_ascii_uppercase();
         }
+        return r;
     }
     replacement.to_string()
 }

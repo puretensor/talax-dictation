@@ -98,7 +98,7 @@ directories rather than a hard-coded path.
     profiles/
         default/
             corrections.db
-            ngram.bin
+            ngram.json
             domain_context.json
             profile.toml
         work-devops/
