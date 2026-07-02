@@ -5,6 +5,15 @@ use arboard::Clipboard;
 use enigo::{Enigo, Keyboard, Settings};
 use serde::{Deserialize, Serialize};
 
+/// How long to wait after issuing the paste keystroke before restoring the
+/// previous clipboard contents, giving the target application time to read it.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(120);
+
+/// Upper bound on how long to poll for our own text to appear on the clipboard
+/// after `set_text`, and the per-iteration poll interval.
+const CLIPBOARD_CONFIRM_TIMEOUT: Duration = Duration::from_millis(200);
+const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -29,15 +38,23 @@ pub enum InjectionError {
 /// How injected text reaches the target application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum InjectionMode {
     /// Copy text to clipboard, then simulate Ctrl+V (Cmd+V on macOS).
-    #[default]
     Clipboard,
     /// Simulate individual keystrokes (slower but broader compatibility).
     TypeOut,
     /// Copy text to clipboard without pasting (safe fallback).
     ClipboardOnly,
+}
+
+impl Default for InjectionMode {
+    /// Defaults to the safe `ClipboardOnly` mode. Auto-pasting (`Clipboard`)
+    /// or simulated keystrokes (`TypeOut`) inject into whatever window
+    /// currently holds focus, which is a footgun if focus has moved; callers
+    /// must opt in to those modes explicitly.
+    fn default() -> Self {
+        Self::ClipboardOnly
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,19 +150,41 @@ impl TextInjector {
 
         self.set_clipboard(text)?;
 
+        // Confirm our text actually landed on the clipboard before pasting.
+        // `set_text` can race the clipboard owner change on some platforms;
+        // poll briefly so the paste does not fire against stale contents.
+        self.wait_for_clipboard(text);
+
         // Simulate paste keystroke.
         self.simulate_paste()?;
 
-        // Small delay so the target app processes the paste event.
-        thread::sleep(Duration::from_millis(50));
+        // Give the target app time to read the clipboard in response to the
+        // paste before we overwrite it again. Restoring too early loses the
+        // race and pastes the *original* clipboard instead of our text.
+        thread::sleep(CLIPBOARD_SETTLE);
 
-        // Restore original clipboard content.
+        // Restore original clipboard content (best-effort; never propagate).
         if let Some(original) = saved {
-            // Best-effort restore; don't propagate errors here.
             let _ = self.set_clipboard(&original);
         }
 
         Ok(())
+    }
+
+    /// Poll the clipboard until it reports `expected`, or the confirm timeout
+    /// elapses. Best-effort: returns once the value matches or time runs out,
+    /// so a non-text or unreadable clipboard never blocks the paste.
+    fn wait_for_clipboard(&self, expected: &str) {
+        let deadline = std::time::Instant::now() + CLIPBOARD_CONFIRM_TIMEOUT;
+        loop {
+            if matches!(self.get_clipboard(), Ok(ref current) if current == expected) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(CLIPBOARD_POLL_INTERVAL);
+        }
     }
 
     /// Simulate Ctrl+V (or Cmd+V on macOS).
@@ -204,7 +243,9 @@ mod tests {
     #[test]
     fn default_config_values() {
         let cfg = InjectionConfig::default();
-        assert_eq!(cfg.mode, InjectionMode::Clipboard);
+        // Default is the safe clipboard-only mode: text is placed on the
+        // clipboard but never auto-pasted into the focused window.
+        assert_eq!(cfg.mode, InjectionMode::ClipboardOnly);
         assert_eq!(cfg.type_delay_ms, 12);
         assert!(cfg.restore_clipboard);
     }
@@ -240,7 +281,7 @@ mod tests {
     fn config_deserialise_with_defaults() {
         // An empty JSON object should populate all defaults.
         let cfg: InjectionConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.mode, InjectionMode::Clipboard);
+        assert_eq!(cfg.mode, InjectionMode::ClipboardOnly);
         assert_eq!(cfg.type_delay_ms, 12);
         assert!(cfg.restore_clipboard);
     }
@@ -266,7 +307,7 @@ mod tests {
         // TextInjector::new is infallible (display-server dependence
         // is deferred to the actual inject/clipboard calls).
         let injector = TextInjector::new(InjectionConfig::default());
-        assert_eq!(injector.config.mode, InjectionMode::Clipboard);
+        assert_eq!(injector.config.mode, InjectionMode::ClipboardOnly);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use talax_engine::db::{Database, SessionDetail, SessionSummary, Stats};
 use talax_engine::hotkey::{HotkeyEvent, HotkeyHandle, HotkeyListener, parse_hotkey};
 use talax_engine::inject::InjectionMode;
-use talax_engine::pipeline::CorrectionPipeline;
+use talax_engine::pipeline::{CorrectionPipeline, PipelineResult};
 use talax_engine::profile::{ProfileManager, is_valid_profile_name};
 use talax_engine::whisper::model_manager::ModelManager;
 use talax_engine::whisper::transcriber::TranscribeParams;
@@ -39,8 +39,12 @@ impl Default for AppConfig {
         Self {
             hotkey: "Ctrl+Shift+Space".to_string(),
             model: "small.en-q5_1".to_string(),
-            review_mode: "auto_inject".to_string(),
-            injection_strategy: "clipboard".to_string(),
+            // Safe default: place the transcript on the clipboard and let the
+            // user paste it deliberately. Auto-inject pastes into whatever
+            // window holds focus, which can leak text into the wrong app if
+            // focus moved during transcription; it must be opted into.
+            review_mode: "review_first".to_string(),
+            injection_strategy: "clipboard_only".to_string(),
             active_profile: "default".to_string(),
             vad_enabled: true,
             pre_roll_ms: 300,
@@ -103,6 +107,9 @@ pub struct AppState {
     pub hotkey_handle: Option<HotkeyHandle>,
 }
 
+/// Lock the shared app state, recovering from a poisoned mutex rather than
+/// panicking inside an IPC handler (a panicked helper thread must not take
+/// the whole command surface down with it).
 fn lock_state(state: &Mutex<AppState>) -> MutexGuard<'_, AppState> {
     state.lock().unwrap_or_else(|poisoned| {
         tracing::error!("application state mutex was poisoned; recovering inner state");
@@ -393,6 +400,26 @@ fn persist_transcription_session(
     Ok(session_id)
 }
 
+/// Persist the session, run the correction pipeline, and stage the corrected
+/// text — all under one lock. Errors are returned (never `?`-propagated past
+/// the caller's cleanup) so the recording state machine can always reset.
+fn stage_transcription(
+    state: &mut AppState,
+    raw_result: &talax_engine::whisper::transcriber::TranscribeResult,
+    duration_sec: f64,
+) -> Result<(PipelineResult, bool, String), String> {
+    let session_id = persist_transcription_session(state, raw_result, duration_sec)?;
+    let corrected = state.pipeline.process(&raw_result.full_text);
+    state
+        .db
+        .as_ref()
+        .ok_or("No active profile")?
+        .stage_corrections(&session_id, &[(0, corrected.corrected.as_str())])
+        .map_err(|e| e.to_string())?;
+    let auto_inject = auto_inject_enabled(&state.config);
+    Ok((corrected, auto_inject, session_id))
+}
+
 pub(crate) fn install_hotkey_listener(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<AppState>>();
 
@@ -483,11 +510,11 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let duration_sec = samples.len() as f64 / 16_000.0;
 
-    let transcriber_result = {
+    let transcriber_handle = {
         let s = lock_state(&state);
         s.recording.transcriber_handle()
     };
-    let transcriber = match transcriber_result {
+    let transcriber = match transcriber_handle {
         Ok(handle) => handle,
         Err(e) => {
             let mut s = lock_state(&state);
@@ -525,18 +552,11 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
     let processing_time_ms = raw_result.processing_time_ms;
 
-    let correction_result = (|| {
+    let staging = {
         let mut s = lock_state(&state);
-        let session_id = persist_transcription_session(&mut s, &raw_result, duration_sec)?;
-        let corrected = s.pipeline.process(&raw_result.full_text);
-        s.db.as_ref()
-            .ok_or("No active profile")?
-            .stage_corrections(&session_id, &[(0, corrected.corrected.as_str())])
-            .map_err(|e| e.to_string())?;
-        let auto_inject = auto_inject_enabled(&s.config);
-        Ok::<_, String>((corrected, auto_inject, session_id))
-    })();
-    let (corrected, auto_inject, session_id) = match correction_result {
+        stage_transcription(&mut s, &raw_result, duration_sec)
+    };
+    let (corrected, auto_inject, session_id) = match staging {
         Ok(values) => values,
         Err(e) => {
             let mut s = lock_state(&state);

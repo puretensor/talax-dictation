@@ -418,7 +418,7 @@ impl HeuristicExpander {
 
         // Pass 3: Contextual number word -> digit in code-like positions.
         // If a number word appears adjacent to an alphanumeric token, convert it.
-        // e.g., "n zero" -> "n0", "storage one" -> "storage-node-1"
+        // e.g., "n zero" -> "n0", "node one" -> "node1"
         let mut i = 0;
         while i + 1 < words.len() {
             let w0 = words[i].to_lowercase();
@@ -509,7 +509,11 @@ fn is_code_prefix(s: &str) -> bool {
 fn is_likely_identifier(s: &str) -> bool {
     let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic());
     let has_digit = s.chars().any(|c| c.is_ascii_digit());
-    has_alpha && has_digit && s.len() <= 10
+    has_alpha
+        && has_digit
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 // ---------------------------------------------------------------------------
@@ -684,9 +688,7 @@ pub fn double_metaphone(input: &str) -> MetaphoneResult {
             }
             'C' => {
                 // Various C rules
-                if pos > 1
-                    && !is_vowel(at(pos - 2))
-                    && string_at(pos - 1, 3, &["ACH"])
+                if pos > 1 && !is_vowel(at(pos - 2)) && string_at(pos - 1, 3, &["ACH"])
                     && at(pos + 2) != 'I'
                     && (at(pos + 2) != 'E' || string_at(pos - 2, 6, &["BACHER", "MACHER"]))
                 {
@@ -732,11 +734,7 @@ pub fn double_metaphone(input: &str) -> MetaphoneResult {
                 } else {
                     primary.push('K');
                     alternate.push('K');
-                    pos += if string_at(pos + 1, 1, &["C", "K", "Q"]) {
-                        2
-                    } else {
-                        1
-                    };
+                    pos += if string_at(pos + 1, 1, &["C", "K", "Q"]) { 2 } else { 1 };
                 }
             }
             'D' => {
@@ -788,11 +786,7 @@ pub fn double_metaphone(input: &str) -> MetaphoneResult {
                     }
                 } else if at(pos + 1) == 'N' {
                     // GN - G is silent
-                    pos += if at(pos + 2) == 'E' || at(pos + 2) == '\0' {
-                        2
-                    } else {
-                        1
-                    };
+                    pos += if at(pos + 2) == 'E' || at(pos + 2) == '\0' { 2 } else { 1 };
                 } else if matches!(at(pos + 1), 'E' | 'I' | 'Y') {
                     primary.push('K');
                     alternate.push('J');
@@ -1112,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compound_node_zero() {
+    fn test_compound_cpu_node0() {
         let mut exp = HeuristicExpander::new();
         exp.proper_nouns
             .insert("cpu-node-0".to_string(), "cpu-node-0".to_string());
@@ -1240,7 +1234,7 @@ mod tests {
         let (result, _) = exp.apply("ssh cpu dash node zero");
         // "cpu dash node zero" -> first pass doesn't know "n zero" directly,
         // but "n" + "zero" -> pass 3 merges "n" + "zero" -> "n0" if known
-        // and "cpu dash n0" -> matched through dash pattern
+        // and "cpu dash node zero" -> matched through dash pattern
         // The exact handling depends on ordering, but the compound should be detected.
         assert!(
             result.contains("cpu-node-0"),
@@ -1436,8 +1430,8 @@ mod tests {
     #[test]
     fn test_is_code_prefix() {
         assert!(is_code_prefix("n"));
-        assert!(is_code_prefix("node"));
         assert!(is_code_prefix("srv"));
+        assert!(is_code_prefix("node"));
         assert!(!is_code_prefix(""));
         assert!(!is_code_prefix("12345"));
         assert!(!is_code_prefix("verylongprefix"));
@@ -1445,7 +1439,7 @@ mod tests {
 
     #[test]
     fn test_is_likely_identifier() {
-        assert!(is_likely_identifier("node1"));
+        assert!(is_likely_identifier("storage-node-1"));
         assert!(is_likely_identifier("n0"));
         assert!(is_likely_identifier("v2"));
         assert!(!is_likely_identifier("hello"));

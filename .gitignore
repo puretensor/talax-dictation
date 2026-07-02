@@ -18,6 +18,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code agent worktrees / local state (never commit; can balloon to GBs)
+.claude/
+
 # Models (downloaded at runtime)
 *.bin
 *.gguf
@@ -28,7 +31,7 @@ corrections.db
 *.db-shm
 profiles/
 
-# Security-sensitive local files
+# -- PureTensor security standards (added 2026-04-11) --
 .env
 .env.*
 *.pem

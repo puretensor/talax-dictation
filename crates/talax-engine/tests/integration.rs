@@ -835,3 +835,64 @@ fn profile_active_tracking() {
     pm.set_active("icelandic");
     assert_eq!(pm.active(), Some("icelandic"));
 }
+
+#[test]
+fn pipeline_learns_correction_end_to_end_via_save_corrections() {
+    // End-to-end learning loop: feed accepted corrections through the real
+    // `save_corrections` API (not a raw SQL seed), let `rebuild_auto_apply`
+    // promote the pattern, then reload the pipeline and assert `process()`
+    // applies the learned substitution via the dictionary layer.
+    //
+    // Regression guard for the learning loop: previously no test drove the
+    // full save_corrections -> auto_apply -> reload -> process path, so a
+    // break between learning and application could go unnoticed.
+    let tdb = TestDb::new();
+
+    // Three accepted reviews of the same substitution "wibble" -> "GCP".
+    // After save_corrections, the pattern reaches frequency=3 with
+    // confidence = 3 / (3 + 0 + 1) = 0.75, which meets the auto_apply
+    // thresholds (frequency >= 3 AND confidence >= 0.75).
+    let learn_db = tdb.open();
+    for i in 0..3 {
+        let sid = format!("learn{i}");
+        learn_db
+            .create_session(&sid, "/tmp/audio.wav", 5.0)
+            .unwrap();
+        learn_db
+            .add_segments(&sid, &[(0.0, 5.0, "the wibble cluster")])
+            .unwrap();
+        learn_db
+            .save_corrections(&sid, &[(0, "the GCP cluster")])
+            .unwrap();
+    }
+
+    // The pattern must have been promoted to auto-apply by the learning loop.
+    assert!(
+        learn_db
+            .get_auto_corrections()
+            .unwrap()
+            .iter()
+            .any(|p| p.original == "wibble" && p.corrected == "GCP"),
+        "save_corrections should promote wibble->GCP to auto-apply after 3 reviews"
+    );
+    drop(learn_db);
+
+    // A freshly reloaded pipeline (as on app restart) must apply the learned
+    // correction to new transcription output.
+    let runtime_db = tdb.open();
+    let mut pipeline = CorrectionPipeline::new();
+    pipeline.try_reload(&runtime_db).unwrap();
+
+    let result = pipeline.process("the wibble cluster");
+    assert_eq!(
+        result.corrected, "the GCP cluster",
+        "reloaded pipeline should apply the learned correction"
+    );
+    assert!(
+        result.changes.iter().any(|c| c.layer == "dictionary"
+            && c.original.to_lowercase() == "wibble"
+            && c.corrected == "GCP"),
+        "the learned correction should be applied by the dictionary layer: {:?}",
+        result.changes
+    );
+}

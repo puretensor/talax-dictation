@@ -1,12 +1,12 @@
 >  **Public distribution repo.** This is the public, BSL-1.1 release cut of **TalaX**.
 >  Development happens in the private `puretensor/TalaX` repo; reviewed releases land here as
->  squashed snapshots. Same product — see TalaX/RELEASING.md for the flow. (88→30 consolidation.)
+>  snapshot commits. Same product — one version line across both repos.
 
 # TalaX
 
 **Adaptive dictation for developers.** Local Whisper transcription with a 3-layer correction pipeline that improves as you use it.
 
-Built by [PureTensor Inc](https://puretensor.ai).
+Built by [PureTensor](https://puretensor.ai).
 
 *Tala* -- Icelandic for "to speak."
 
@@ -67,7 +67,9 @@ Tauri v2 (Svelte 5 frontend, Rust backend)
 1. Hold the hotkey (default: `Ctrl+Shift+Space`)
 2. Speak naturally
 3. Release
-4. TalaX transcribes locally, runs corrections, and injects text into your active app
+4. TalaX transcribes locally, runs corrections, and places the result on your clipboard to review and paste
+
+By default TalaX uses **review-first / clipboard-only** delivery: the corrected text is copied to your clipboard and you paste it yourself. Auto-inject (simulated paste) and keystroke type-out are opt-in. They inject into whatever window holds focus at that moment, so if focus moves during transcription the text can land in the wrong application -- only enable them once you trust your workflow.
 
 When you review and correct a transcription, the diff is extracted at the word level and stored as correction patterns. Patterns that recur 3+ times with high confidence are promoted to auto-apply. The n-gram model retrains on your reviewed corpus each time the pipeline reloads, improving context-aware corrections over time.
 
@@ -82,7 +84,7 @@ When you review and correct a transcription, the diff is extracted at the word l
 - Phonetic matching (Double Metaphone)
 - Compound word detection (split/join)
 - Acronym restoration (lowercase to uppercase)
-- Number normalization ("v two" to "v2", "node zero" to "node0")
+- Number normalization ("v two" to "v2", "cpu dash node zero" to "cpu-node-0")
 
 ## Voice Profiles
 
@@ -124,48 +126,57 @@ Downloaded from HuggingFace on first use with progress tracking and integrity ve
 
 ### Prerequisites
 
-- Rust (stable, edition 2024)
+- Rust (stable, edition 2024) with `cargo install tauri-cli`
 - Node.js 24+ recommended
-- Linux system libraries: `libasound2-dev`, `libx11-dev`, `libxtst-dev`, `cmake`, `pkg-config`
+- Linux system libraries: `libasound2-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+  `libwebkit2gtk-4.1-dev`, `libx11-dev`, `libxtst-dev`, `cmake`, `pkg-config`
 
 ### Build and Run
 
 ```bash
 git clone https://github.com/puretensor/talax-dictation.git
 cd talax-dictation
-cd ui && npm install && cd ..
+npm --prefix ui install
 
-# Development mode
-cargo tauri dev
+# Development mode (run from the app crate)
+cd crates/talax-app && cargo tauri dev
 
-# Engine tests
-cargo test -p talax-engine
+# Release bundle (deb/rpm/AppImage on Linux)
+cd crates/talax-app && cargo tauri build
 
-# Type-check frontend
-cd ui && npx svelte-check
+# Engine tests (from the repo root)
+cargo test --workspace
+
+# Type-check + unit-test frontend
+npm --prefix ui run check && npm --prefix ui test
 ```
 
 ### Test Coverage
 
-The engine test suite currently includes 137 unit tests, 36 integration tests, and doctests. Coverage focuses on:
+The suite currently includes 138 engine unit tests, 38 engine integration tests, 6 app unit
+tests (including config validation), frontend unit tests (vitest), and doctests. Coverage focuses on:
 
 | Area | Covers |
 |------|--------|
-| Dictionary corrector | Word boundaries, case preservation, longest-match behavior |
-| N-gram corrector | Training, save/load, scoring, vocabulary behavior |
+| Dictionary corrector | Word boundaries, case preservation, longest-match, contextual rules |
+| N-gram corrector | Training, JSON save/load, scoring |
 | Heuristic expander | Levenshtein, Metaphone, compounds, acronyms, numbers |
-| Database | Corrections, patterns, auto-apply, domain context |
-| Profiles | CRUD, clone independence, reset behavior |
-| Audio | Energy detection, VAD state transitions, ring buffer behavior |
-| Whisper | Params, conversion, model metadata, serialization |
-| Hotkey | Parse, key mapping, validation, serialization |
-| Inject | Config, serialization, mode handling |
-| Integration | Full pipeline, multi-layer correction, reload behavior |
+| Database | Corrections, patterns, auto-apply, domain context, fallible reads |
+| Profiles | CRUD, clone independence + atomic clone, reset |
+| Audio (VAD + buffer) | Energy detection, state transitions, ring buffer |
+| Whisper | Params, conversion, serialization |
+| Hotkey | Parse, key mapping, validation |
+| Inject | Config, serialization, mode handling, safe defaults |
+| App commands | Config validation (hotkey/modes/ranges/profile name) |
+| Integration | Full pipeline, multi-layer, reload, end-to-end learning loop |
+| Frontend | IPC failure fallbacks (`ui/src/lib/api.test.ts`) |
 
 ## Release Validation
 
-- Generated Tauri schema output under `crates/talax-app/gen/` is treated as disposable generated output and is not committed.
-- Before packaging a release, run `cargo test -p talax-engine`, `cd ui && npm run check`, and a manual desktop smoke test on the target platform.
+- Cross-platform smoke runbook: `tasks/platform_smoke_runbook.md`
+- Smoke report template: `tasks/platform_smoke_report_template.md`
+- Generated Tauri schema output under `crates/talax-app/gen/` is treated as
+  disposable generated output and is not committed.
 
 ## Tech Stack
 
@@ -204,4 +215,4 @@ talax/
 
 ## License
 
-Business Source License 1.1. Copyright 2026 PureTensor Inc. Converts to Apache 2.0 on 2030-03-28. See [LICENSE](LICENSE).
+Business Source License 1.1. Copyright 2026 PureTensor, Inc. Converts to Apache 2.0 on 2030-03-28. See [LICENSE](LICENSE).

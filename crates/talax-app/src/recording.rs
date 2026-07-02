@@ -238,7 +238,9 @@ impl RecordingOrchestrator {
             capture: None,
             transcriber: None,
             model_path: None,
-            injection_mode: InjectionMode::Clipboard,
+            // Safe default until the app applies the user's configured
+            // strategy; auto-paste/keystroke modes must be opted into.
+            injection_mode: InjectionMode::default(),
             capture_settings: CaptureSettings::default(),
         }
     }
