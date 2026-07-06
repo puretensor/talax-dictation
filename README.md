@@ -4,9 +4,12 @@
 
 # TalaX
 
+[![Latest release](https://img.shields.io/github/v/release/puretensor/talax-dictation)](https://github.com/puretensor/talax-dictation/releases/latest)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
+
 **Adaptive dictation for developers.** Local Whisper transcription with a 3-layer correction pipeline that improves as you use it.
 
-Built by [PureTensor](https://puretensor.ai).
+Built by [PureTensor](https://puretensor.ai) · [talax.puretensor.ai](https://talax.puretensor.ai)
 
 *Tala* -- Icelandic for "to speak."
 
@@ -14,6 +17,28 @@ Built by [PureTensor](https://puretensor.ai).
 - **3-layer correction pipeline** -- dictionary substitution (<1ms), n-gram context scoring (<50ms), heuristic expansion (<10ms)
 - **Fully local** -- whisper.cpp via whisper-rs, no audio leaves your machine, no subscription
 - **Voice profiles** -- separate correction databases per context (work, personal, project-specific)
+
+## Install
+
+Prebuilt packages for **Linux x86_64** (deb, rpm, AppImage) are on the
+[releases page](https://github.com/puretensor/talax-dictation/releases/latest), alongside
+`SHA256SUMS.txt` for integrity verification.
+
+```bash
+# Verify checksums (optional)
+sha256sum -c SHA256SUMS.txt --ignore-missing
+
+# Debian / Ubuntu
+sudo apt install ./TalaX_*_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./TalaX-*.x86_64.rpm
+
+# AppImage (any distro)
+chmod +x TalaX_*_amd64.AppImage && ./TalaX_*_amd64.AppImage
+```
+
+macOS and Windows are source-build only for now -- see [Development](#development).
 
 ## Development Status
 
@@ -38,7 +63,7 @@ TalaX is functional but early-stage. Here is what works today and what is still 
 - Cross-profile pattern sharing
 - Audio excerpt extraction for fine-tuning
 - Batch correction review workflows
-- Platform-specific packaging and distribution
+- macOS and Windows packaging (Linux deb/rpm/AppImage ship since v1.2.0; other platforms build from source)
 
 ## Architecture
 
