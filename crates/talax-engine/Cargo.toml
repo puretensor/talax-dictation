@@ -12,7 +12,7 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ureq = "3"
-cpal = "0.15"
+cpal = "0.18"
 whisper-rs = "0.16"
 rdev = "0.5"
 arboard = "3"
