@@ -12,7 +12,18 @@ all-features = true
 yanked = "deny"
 unmaintained = "workspace"
 unsound = "workspace"
-ignore = []
+# Waived advisories (mirror the list in .cargo/audit.toml — CI runs both
+# `cargo audit` and `cargo deny check advisories`, so both must ignore them).
+#
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — quadratic-time / unbounded-allocation
+# DoS in quick-xml < 0.41.0. quick-xml is purely transitive here
+# (tauri -> plist 1.8.0 -> quick-xml 0.38.4), used only for build-time Apple
+# property-list (Info.plist) handling during packaging, not runtime parsing of
+# untrusted network XML. Un-bumpable today: plist 1.8.0 pins quick-xml ^0.38 and
+# no released plist/tauri consumes >= 0.41.0. DROP these once plist/tauri ship a
+# build on quick-xml >= 0.41.0. Same waiver as TalaX (2026-07-05).
+# Tracked: talax-dictation CI advisory hold, 2026-07-17.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 [bans]
 multiple-versions = "allow"
