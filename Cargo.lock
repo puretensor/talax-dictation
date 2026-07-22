@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "talax-app"
-version = "1.2.0"
+version = "1.2.3"
 dependencies = [
  "serde",
  "talax-engine",
@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "talax-engine"
-version = "1.2.0"
+version = "1.2.3"
 dependencies = [
  "arboard",
  "cpal",

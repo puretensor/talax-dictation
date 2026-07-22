@@ -358,6 +358,20 @@ fn emit_recording_state(app: &AppHandle, state: RecordingState, message: Option<
     let _ = app.emit("recording-state", RecordingEvent { state, message });
 }
 
+fn recover_injection_failure<F>(error: &str, copy: F) -> String
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    match copy() {
+        Ok(()) => format!(
+            "Automatic paste failed; the transcript was copied to the clipboard for manual paste: {error}"
+        ),
+        Err(copy_error) => format!(
+            "Automatic paste failed; the transcript is available in session history: {error}. Clipboard recovery failed: {copy_error}"
+        ),
+    }
+}
+
 pub(crate) fn configure_pipeline_for_profile(
     state: &mut AppState,
     profile_name: &str,
@@ -579,7 +593,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
         },
     );
 
-    if auto_inject {
+    let injection_error = if auto_inject {
         emit_recording_state(&app, RecordingState::Injecting, None);
 
         let inject_result = {
@@ -589,15 +603,28 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
 
         if let Err(e) = inject_result {
             tracing::warn!("text injection failed: {e}");
+            let message = recover_injection_failure(&e, || {
+                let s = lock_state(&state);
+                s.recording.copy_to_clipboard(&corrected.corrected)
+            });
+            Some(message)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     {
         let mut s = lock_state(&state);
         s.recording.set_idle();
     }
 
-    emit_recording_state(&app, RecordingState::Idle, None);
+    if let Some(message) = injection_error {
+        emit_recording_state(&app, RecordingState::Error, Some(message));
+    } else {
+        emit_recording_state(&app, RecordingState::Idle, None);
+    }
 
     Ok(())
 }
@@ -1077,5 +1104,21 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_config_values(&config).is_err());
+    }
+
+    #[test]
+    fn injection_failure_recovery_attempts_copy_and_reports_the_result() {
+        let copy_attempted = std::cell::Cell::new(false);
+        let recovered = recover_injection_failure("paste failed", || {
+            copy_attempted.set(true);
+            Ok(())
+        });
+        assert!(copy_attempted.get());
+        assert!(recovered.contains("copied to the clipboard"));
+
+        let unavailable =
+            recover_injection_failure("paste failed", || Err("clipboard unavailable".to_string()));
+        assert!(unavailable.contains("available in session history"));
+        assert!(unavailable.contains("Clipboard recovery failed"));
     }
 }

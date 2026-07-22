@@ -2,7 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use arboard::Clipboard;
-use enigo::{Enigo, Keyboard, Settings};
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use serde::{Deserialize, Serialize};
 
 /// How long to wait after issuing the paste keystroke before restoring the
@@ -11,7 +11,7 @@ const CLIPBOARD_SETTLE: Duration = Duration::from_millis(120);
 
 /// Upper bound on how long to poll for our own text to appear on the clipboard
 /// after `set_text`, and the per-iteration poll interval.
-const CLIPBOARD_CONFIRM_TIMEOUT: Duration = Duration::from_millis(200);
+const CLIPBOARD_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // ---------------------------------------------------------------------------
@@ -72,8 +72,8 @@ pub struct InjectionConfig {
     #[serde(default = "default_type_delay_ms")]
     pub type_delay_ms: u64,
 
-    /// Whether to save and restore the original clipboard content after
-    /// injecting via `Clipboard` mode.
+    /// Whether to restore the original clipboard after a successful paste.
+    /// Once copied, failed pastes leave the transcript available for a manual paste.
     #[serde(default = "default_restore_clipboard")]
     pub restore_clipboard: bool,
 }
@@ -153,7 +153,7 @@ impl TextInjector {
         // Confirm our text actually landed on the clipboard before pasting.
         // `set_text` can race the clipboard owner change on some platforms;
         // poll briefly so the paste does not fire against stale contents.
-        self.wait_for_clipboard(text);
+        self.wait_for_clipboard(text)?;
 
         // Simulate paste keystroke.
         self.simulate_paste()?;
@@ -171,20 +171,14 @@ impl TextInjector {
         Ok(())
     }
 
-    /// Poll the clipboard until it reports `expected`, or the confirm timeout
-    /// elapses. Best-effort: returns once the value matches or time runs out,
-    /// so a non-text or unreadable clipboard never blocks the paste.
-    fn wait_for_clipboard(&self, expected: &str) {
-        let deadline = std::time::Instant::now() + CLIPBOARD_CONFIRM_TIMEOUT;
-        loop {
-            if matches!(self.get_clipboard(), Ok(ref current) if current == expected) {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                return;
-            }
-            thread::sleep(CLIPBOARD_POLL_INTERVAL);
-        }
+    /// Poll until the clipboard confirms the expected text before pasting.
+    fn wait_for_clipboard(&self, expected: &str) -> Result<(), InjectionError> {
+        wait_for_expected_value(
+            expected,
+            CLIPBOARD_CONFIRM_TIMEOUT,
+            CLIPBOARD_POLL_INTERVAL,
+            || self.get_clipboard(),
+        )
     }
 
     /// Simulate Ctrl+V (or Cmd+V on macOS).
@@ -193,22 +187,16 @@ impl TextInjector {
             .map_err(|e| InjectionError::KeystrokeSimulation(e.to_string()))?;
 
         let modifier = if cfg!(target_os = "macos") {
-            enigo::Key::Meta
+            Key::Meta
         } else {
-            enigo::Key::Control
+            Key::Control
         };
 
-        enigo
-            .key(modifier, enigo::Direction::Press)
-            .map_err(|e| InjectionError::KeystrokeSimulation(e.to_string()))?;
-        enigo
-            .key(enigo::Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| InjectionError::KeystrokeSimulation(e.to_string()))?;
-        enigo
-            .key(modifier, enigo::Direction::Release)
-            .map_err(|e| InjectionError::KeystrokeSimulation(e.to_string()))?;
-
-        Ok(())
+        perform_paste(modifier, |key, direction| {
+            enigo
+                .key(key, direction)
+                .map_err(|e| InjectionError::KeystrokeSimulation(e.to_string()))
+        })
     }
 
     /// TypeOut mode: type each character with a small inter-key delay.
@@ -230,6 +218,41 @@ impl TextInjector {
 
         Ok(())
     }
+}
+
+fn wait_for_expected_value<F>(
+    expected: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    mut read: F,
+) -> Result<(), InjectionError>
+where
+    F: FnMut() -> Result<String, InjectionError>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if matches!(read(), Ok(ref current) if current == expected) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(InjectionError::Timeout(format!(
+                "clipboard did not confirm injected text within {} ms",
+                timeout.as_millis()
+            )));
+        }
+        thread::sleep(poll_interval);
+    }
+}
+
+fn perform_paste<F>(modifier: Key, mut emit: F) -> Result<(), InjectionError>
+where
+    F: FnMut(Key, Direction) -> Result<(), InjectionError>,
+{
+    emit(modifier, Direction::Press)?;
+    let click_result = emit(Key::Unicode('v'), Direction::Click);
+    let release_result = emit(modifier, Direction::Release);
+    click_result?;
+    release_result
 }
 
 // ---------------------------------------------------------------------------
@@ -320,5 +343,59 @@ mod tests {
 
         let e = InjectionError::Timeout("5s elapsed".into());
         assert!(e.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn clipboard_confirmation_retries_until_expected_text_appears() {
+        let mut reads = 0;
+        let result = wait_for_expected_value(
+            "transcript",
+            Duration::from_millis(100),
+            Duration::ZERO,
+            || {
+                reads += 1;
+                Ok(if reads == 1 {
+                    "stale".to_string()
+                } else {
+                    "transcript".to_string()
+                })
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn clipboard_confirmation_reports_timeout() {
+        let result = wait_for_expected_value("transcript", Duration::ZERO, Duration::ZERO, || {
+            Ok("stale".to_string())
+        });
+
+        assert!(matches!(result, Err(InjectionError::Timeout(_))));
+    }
+
+    #[test]
+    fn paste_releases_modifier_when_click_fails() {
+        let mut directions = Vec::new();
+        let result = perform_paste(Key::Control, |_, direction| {
+            directions.push(direction);
+            if direction == Direction::Click {
+                Err(InjectionError::KeystrokeSimulation(
+                    "click failed".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(matches!(
+            result,
+            Err(InjectionError::KeystrokeSimulation(_))
+        ));
+        assert_eq!(
+            directions,
+            vec![Direction::Press, Direction::Click, Direction::Release]
+        );
     }
 }

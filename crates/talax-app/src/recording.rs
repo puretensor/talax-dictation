@@ -329,6 +329,14 @@ impl RecordingOrchestrator {
         injector.inject(text).map_err(|e| e.to_string())
     }
 
+    /// Place a transcript on the clipboard independently of the configured
+    /// injection mode so a failed automatic delivery remains recoverable.
+    pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        TextInjector::new(InjectionConfig::default())
+            .set_clipboard(text)
+            .map_err(|e| e.to_string())
+    }
+
     /// Reset state back to idle.
     pub fn set_idle(&mut self) {
         self.state = RecordingState::Idle;
