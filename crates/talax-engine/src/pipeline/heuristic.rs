@@ -323,7 +323,10 @@ impl HeuristicExpander {
             let w2 = words[i + 2].to_lowercase();
 
             if w1 == "point"
-                && let (Some(n0), Some(n2)) = (word_to_digit(&w0), word_to_digit(&w2))
+                && let (Some(n0), Some(n2)) = (
+                    unambiguous_word_to_digit(&w0),
+                    unambiguous_word_to_digit(&w2),
+                )
             {
                 let replacement = format!("{n0}.{n2}");
                 let original = format!("{} {} {}", words[i], words[i + 1], words[i + 2]);
@@ -350,9 +353,12 @@ impl HeuristicExpander {
             let w0 = words[i].to_lowercase();
             let w1 = words[i + 1].to_lowercase();
 
-            if (w0 == "v" || w0 == "version")
-                && let Some(d) = word_to_digit(&w1)
-            {
+            let version_digit = match w0.as_str() {
+                "v" => word_to_digit(&w1),
+                "version" => unambiguous_word_to_digit(&w1),
+                _ => None,
+            };
+            if let Some(d) = version_digit {
                 let replacement = format!("v{d}");
                 let original = format!("{} {}", words[i], words[i + 1]);
                 changes.push(Change {
@@ -416,8 +422,7 @@ impl HeuristicExpander {
             i += 1;
         }
 
-        // Pass 3: Contextual number word -> digit in code-like positions.
-        // If a number word appears adjacent to an alphanumeric token, convert it.
+        // Pass 3: Contextual number word -> digit for learned identifiers.
         // e.g., "n zero" -> "n0", "node one" -> "node1"
         let mut i = 0;
         while i + 1 < words.len() {
@@ -429,13 +434,7 @@ impl HeuristicExpander {
                 && let Some(d) = word_to_digit(&w1)
             {
                 let merged = format!("{}{}", w0, d);
-                // Only merge if the result is a known proper noun or looks like a code
-                if self.proper_nouns.contains_key(&merged) || is_likely_identifier(&merged) {
-                    let correct = self
-                        .proper_nouns
-                        .get(&merged)
-                        .cloned()
-                        .unwrap_or_else(|| merged.clone());
+                if let Some(correct) = self.proper_nouns.get(&merged) {
                     let original = format!("{} {}", words[i], words[i + 1]);
                     changes.push(Change {
                         layer: "heuristic".to_string(),
@@ -446,7 +445,7 @@ impl HeuristicExpander {
                         original_score: None,
                         corrected_score: None,
                     });
-                    words[i] = correct;
+                    words[i] = correct.clone();
                     words.remove(i + 1);
                     continue;
                 }
@@ -491,6 +490,23 @@ fn word_to_digit(word: &str) -> Option<char> {
     }
 }
 
+/// Map only explicit digit words, excluding common homophones such as "to" and "for".
+fn unambiguous_word_to_digit(word: &str) -> Option<char> {
+    match word.to_lowercase().as_str() {
+        "zero" => Some('0'),
+        "one" => Some('1'),
+        "two" => Some('2'),
+        "three" => Some('3'),
+        "four" => Some('4'),
+        "five" => Some('5'),
+        "six" => Some('6'),
+        "seven" => Some('7'),
+        "eight" => Some('8'),
+        "nine" => Some('9'),
+        _ => None,
+    }
+}
+
 /// If a word is a number word, return the version with the digit; otherwise return as-is.
 fn normalize_trailing_number_word(word: &str) -> String {
     if let Some(d) = word_to_digit(word) {
@@ -503,17 +519,6 @@ fn normalize_trailing_number_word(word: &str) -> String {
 /// Check if a string looks like a short code prefix (1-4 alpha chars).
 fn is_code_prefix(s: &str) -> bool {
     !s.is_empty() && s.len() <= 4 && s.chars().all(|c| c.is_ascii_alphabetic())
-}
-
-/// Check if a string looks like an identifier (letters followed by digits or vice versa).
-fn is_likely_identifier(s: &str) -> bool {
-    let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic());
-    let has_digit = s.chars().any(|c| c.is_ascii_digit());
-    has_alpha
-        && has_digit
-        && s.len() <= 64
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,6 +1211,9 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].original, "v two");
         assert_eq!(changes[0].corrected, "v2");
+
+        let (result, _) = exp.apply("running v to now");
+        assert_eq!(result, "running v2 now");
     }
 
     #[test]
@@ -1213,6 +1221,10 @@ mod tests {
         let exp = HeuristicExpander::new();
         let (result, _) = exp.apply("use version three");
         assert_eq!(result, "use v3");
+
+        let (result, changes) = exp.apply("choose the version to ship");
+        assert_eq!(result, "choose the version to ship");
+        assert!(changes.is_empty());
     }
 
     #[test]
@@ -1261,6 +1273,22 @@ mod tests {
 
         let (result, _) = exp.apply("node n zero is down");
         assert_eq!(result, "node n0 is down");
+    }
+
+    #[test]
+    fn test_number_normalization_preserves_ordinary_prose() {
+        let exp = HeuristicExpander::new();
+
+        for text in [
+            "I have one idea",
+            "the two options",
+            "I need to point for clarity",
+            "we need four servers",
+        ] {
+            let (result, changes) = exp.apply(text);
+            assert_eq!(result, text);
+            assert!(changes.is_empty());
+        }
     }
 
     // === Context-aware scoring ===
@@ -1425,7 +1453,17 @@ mod tests {
         assert_eq!(word_to_digit("hello"), None);
     }
 
-    // === is_code_prefix / is_likely_identifier helpers ===
+    #[test]
+    fn test_unambiguous_word_to_digit_rejects_homophones() {
+        assert_eq!(unambiguous_word_to_digit("two"), Some('2'));
+        assert_eq!(unambiguous_word_to_digit("four"), Some('4'));
+        assert_eq!(unambiguous_word_to_digit("to"), None);
+        assert_eq!(unambiguous_word_to_digit("too"), None);
+        assert_eq!(unambiguous_word_to_digit("for"), None);
+        assert_eq!(unambiguous_word_to_digit("oh"), None);
+    }
+
+    // === is_code_prefix helper ===
 
     #[test]
     fn test_is_code_prefix() {
@@ -1435,14 +1473,5 @@ mod tests {
         assert!(!is_code_prefix(""));
         assert!(!is_code_prefix("12345"));
         assert!(!is_code_prefix("verylongprefix"));
-    }
-
-    #[test]
-    fn test_is_likely_identifier() {
-        assert!(is_likely_identifier("storage-node-1"));
-        assert!(is_likely_identifier("n0"));
-        assert!(is_likely_identifier("v2"));
-        assert!(!is_likely_identifier("hello"));
-        assert!(!is_likely_identifier("123"));
     }
 }
