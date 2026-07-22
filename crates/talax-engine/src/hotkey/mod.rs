@@ -259,28 +259,28 @@ pub enum HotkeyEvent {
 // HotkeyHandle
 // ---------------------------------------------------------------------------
 
-/// Handle returned from [`HotkeyListener::start`]; dropping or calling
-/// [`stop`](HotkeyHandle::stop) signals the background thread to exit.
+/// Handle returned from [`HotkeyListener::start`]. Dropping or stopping it
+/// suppresses callbacks; the OS listener remains detached until `rdev` exits.
 pub struct HotkeyHandle {
     stop_flag: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HotkeyHandle {
-    /// Signal the listener thread to stop and wait for it to finish.
-    pub fn stop(mut self) {
+    fn signal_and_detach(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.thread.take() {
-            // The rdev loop may not exit instantly (it blocks on OS events),
-            // so we just signal and detach rather than blocking indefinitely.
-            let _ = handle.join();
-        }
+        drop(self.thread.take());
+    }
+
+    /// Suppress future callbacks without waiting on `rdev`'s blocking loop.
+    pub fn stop(mut self) {
+        self.signal_and_detach();
     }
 }
 
 impl Drop for HotkeyHandle {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal_and_detach();
     }
 }
 
@@ -382,9 +382,8 @@ impl HotkeyListener {
                 }
             };
 
-            // rdev::listen blocks until an error or the process exits.
-            // There is no clean shutdown API in rdev, so we just let the
-            // thread terminate when the process exits or the flag is set.
+            // rdev::listen has no shutdown API and blocks until an OS error or
+            // process exit. The stop flag makes a detached listener dormant.
             if let Err(e) = rdev::listen(cb) {
                 tracing::error!("rdev listen error: {:?}", e);
             }
@@ -646,5 +645,32 @@ mod tests {
             mode: HotkeyMode::PushToTalk,
         });
         assert!(listener.validate().is_ok());
+    }
+
+    #[test]
+    fn stop_does_not_wait_for_a_blocked_listener() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let observed_flag = Arc::clone(&stop_flag);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker = thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        let handle = HotkeyHandle {
+            stop_flag,
+            thread: Some(worker),
+        };
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stopper = thread::spawn(move || {
+            handle.stop();
+            let _ = done_tx.send(());
+        });
+
+        let stopped = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let _ = release_tx.send(());
+        let _ = stopper.join();
+
+        assert!(stopped.is_ok(), "stop waited for the listener thread");
+        assert!(observed_flag.load(Ordering::SeqCst));
     }
 }
