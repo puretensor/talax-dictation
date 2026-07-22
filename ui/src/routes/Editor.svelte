@@ -2,6 +2,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import { getSessions, getSession, saveCorrections } from "../lib/api";
+  import { LatestRequest } from "../lib/latest-request";
   import type { SessionSummary, SessionDetail, SegmentDetail } from "../lib/api";
 
   let sessions: SessionSummary[] = $state([]);
@@ -12,6 +13,7 @@
   let saveMessage = $state("");
   let loading = $state(true);
   let loadingDetail = $state(false);
+  const detailRequests = new LatestRequest();
 
   async function loadSessions() {
     loading = true;
@@ -19,15 +21,25 @@
     loading = false;
   }
 
+  async function loadExpandedDetail(id: string) {
+    const request = detailRequests.begin();
+    loadingDetail = true;
+    const detail = await getSession(id);
+    if (!detailRequests.isCurrent(request) || expandedId !== id) return;
+    expandedDetail = detail;
+    loadingDetail = false;
+  }
+
   async function toggleSession(id: string) {
     if (expandedId === id) {
+      detailRequests.invalidate();
       expandedId = null;
       expandedDetail = null;
+      loadingDetail = false;
     } else {
       expandedId = id;
-      loadingDetail = true;
-      expandedDetail = await getSession(id);
-      loadingDetail = false;
+      expandedDetail = null;
+      await loadExpandedDetail(id);
     }
   }
 
@@ -61,7 +73,7 @@
       await saveCorrections(sessionId, corrections);
       await loadSessions();
       if (expandedId === sessionId) {
-        expandedDetail = await getSession(sessionId);
+        await loadExpandedDetail(sessionId);
       }
       const nextEdits = new Map(editedTexts);
       nextEdits.delete(sessionId);
@@ -97,12 +109,14 @@
     loadSessions();
     const unlisten = listen("profile-data-changed", async () => {
       await loadSessions();
-      if (expandedId) {
-        expandedDetail = await getSession(expandedId);
+      const id = expandedId;
+      if (id) {
+        await loadExpandedDetail(id);
       }
     });
 
     return () => {
+      detailRequests.invalidate();
       unlisten.then((fn) => fn());
     };
   });
