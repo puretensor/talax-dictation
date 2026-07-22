@@ -358,6 +358,37 @@ fn emit_recording_state(app: &AppHandle, state: RecordingState, message: Option<
     let _ = app.emit("recording-state", RecordingEvent { state, message });
 }
 
+fn ensure_context_mutation_allowed(state: RecordingState) -> Result<(), String> {
+    if state == RecordingState::Idle {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot change recording context while in {state:?} state"
+        ))
+    }
+}
+
+fn ensure_model_load_is_current(
+    current_model: &str,
+    loaded_model: &str,
+    recording_state: RecordingState,
+) -> Result<(), String> {
+    ensure_context_mutation_allowed(recording_state)?;
+    if current_model == loaded_model {
+        Ok(())
+    } else {
+        Err("model selection changed while the model was loading".to_string())
+    }
+}
+
+fn reset_recording_after_error(state: &Mutex<AppState>, app: &AppHandle, error: &str) {
+    {
+        let mut state = lock_state(state);
+        state.recording.set_idle();
+    }
+    emit_recording_state(app, RecordingState::Error, Some(error.to_string()));
+}
+
 pub(crate) fn configure_pipeline_for_profile(
     state: &mut AppState,
     profile_name: &str,
@@ -500,6 +531,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     if samples.is_empty() {
         let mut s = lock_state(&state);
         s.recording.set_idle();
+        drop(s);
         emit_recording_state(
             &app,
             RecordingState::Idle,
@@ -517,15 +549,12 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     let transcriber = match transcriber_handle {
         Ok(handle) => handle,
         Err(e) => {
-            let mut s = lock_state(&state);
-            s.recording.set_idle();
-            drop(s);
-            emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
+            reset_recording_after_error(&state, &app, &e);
             return Err(e);
         }
     };
 
-    let raw_result = tauri::async_runtime::spawn_blocking(move || {
+    let task_result = tauri::async_runtime::spawn_blocking(move || {
         let guard = transcriber.lock().map_err(|e| e.to_string())?;
         let params = TranscribeParams {
             language: Some("en".to_string()),
@@ -536,16 +565,21 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(result)
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
+
+    let raw_result = match task_result {
+        Ok(result) => result,
+        Err(e) => {
+            let error = e.to_string();
+            reset_recording_after_error(&state, &app, &error);
+            return Err(error);
+        }
+    };
 
     let raw_result = match raw_result {
         Ok(r) => r,
         Err(e) => {
-            let mut s = lock_state(&state);
-            s.recording.set_idle();
-            drop(s);
-            emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
+            reset_recording_after_error(&state, &app, &e);
             return Err(e);
         }
     };
@@ -559,10 +593,7 @@ async fn stop_recording_impl(app: AppHandle) -> Result<(), String> {
     let (corrected, auto_inject, session_id) = match staging {
         Ok(values) => values,
         Err(e) => {
-            let mut s = lock_state(&state);
-            s.recording.set_idle();
-            drop(s);
-            emit_recording_state(&app, RecordingState::Error, Some(e.clone()));
+            reset_recording_after_error(&state, &app, &e);
             return Err(e);
         }
     };
@@ -624,6 +655,7 @@ pub fn create_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result
 #[tauri::command]
 pub fn switch_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<(), String> {
     let mut state = lock_state(&state);
+    ensure_context_mutation_allowed(state.recording.state())?;
     let db = configure_pipeline_for_profile(&mut state, &name)?;
     state.profile_mgr.set_active(&name);
     state.active_profile = name.clone();
@@ -646,6 +678,9 @@ pub fn delete_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result
 #[tauri::command]
 pub fn reset_profile(state: State<'_, Mutex<AppState>>, name: String) -> Result<(), String> {
     let mut state = lock_state(&state);
+    if name == state.active_profile {
+        ensure_context_mutation_allowed(state.recording.state())?;
+    }
     state.profile_mgr.reset_profile(&name).map(|_| ())?;
     // If this was the active profile, reopen its database and reload pipeline
     if name == state.active_profile {
@@ -853,22 +888,18 @@ pub async fn load_whisper_model(
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
-    // Check if already loaded
-    {
+    let (model_id, model_path) = {
         let s = lock_state(&state);
+        ensure_context_mutation_allowed(s.recording.state())?;
         if s.recording.is_model_loaded() {
             return Ok(());
         }
-    }
-
-    // Load model in a blocking task
-    // We need to extract the model path, load outside the lock, then store
-    let model_path = {
-        let s = lock_state(&state);
-        let model_id = &s.config.model;
-        s.model_mgr
-            .get_model_path(model_id)
-            .ok_or_else(|| format!("unknown model: {}", model_id))?
+        let model_id = s.config.model.clone();
+        let model_path = s
+            .model_mgr
+            .get_model_path(&model_id)
+            .ok_or_else(|| format!("unknown model: {model_id}"))?;
+        (model_id, model_path)
     };
 
     if !model_path.exists() {
@@ -887,6 +918,7 @@ pub async fn load_whisper_model(
     // Store the already-loaded model inside the lock.
     {
         let mut s = lock_state(&state);
+        ensure_model_load_is_current(&s.config.model, &model_id, s.recording.state())?;
         s.recording.set_model_path(model_path);
         s.recording.set_loaded_transcriber(transcriber);
     }
@@ -985,21 +1017,17 @@ pub fn save_app_config(
 ) -> Result<(), String> {
     validate_config_values(&config)?;
 
-    let config_dir = {
-        let state = lock_state(&state);
+    let restart_hotkey;
+    {
+        let mut state = lock_state(&state);
+        ensure_context_mutation_allowed(state.recording.state())?;
         if state.model_mgr.get_model_path(&config.model).is_none() {
             return Err(format!("unknown model: {}", config.model));
         }
         if config.active_profile != state.active_profile {
             return Err("active_profile must be changed with switch_profile".to_string());
         }
-        state.config_dir.clone()
-    };
-    save_config_to_disk(&config_dir, &config)?;
-
-    let restart_hotkey;
-    {
-        let mut state = lock_state(&state);
+        save_config_to_disk(&state.config_dir, &config)?;
         restart_hotkey = config.hotkey != state.config.hotkey;
 
         state
@@ -1077,5 +1105,25 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_config_values(&config).is_err());
+    }
+
+    #[test]
+    fn context_mutation_is_only_allowed_while_idle() {
+        assert!(ensure_context_mutation_allowed(RecordingState::Idle).is_ok());
+        for state in [
+            RecordingState::Recording,
+            RecordingState::Processing,
+            RecordingState::Injecting,
+            RecordingState::Error,
+        ] {
+            assert!(ensure_context_mutation_allowed(state).is_err());
+        }
+    }
+
+    #[test]
+    fn model_load_commit_rejects_stale_or_non_idle_context() {
+        assert!(ensure_model_load_is_current("small", "small", RecordingState::Idle).is_ok());
+        assert!(ensure_model_load_is_current("base", "small", RecordingState::Idle).is_err());
+        assert!(ensure_model_load_is_current("small", "small", RecordingState::Recording).is_err());
     }
 }
