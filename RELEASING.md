@@ -1,33 +1,46 @@
 # Releasing TalaX
 
-TalaX is the **canonical, private development repo** for the adaptive-dictation desktop app.
-The public, BSL-1.1-licensed distribution lives in a separate repo: **`puretensor/talax-dictation`**.
+`puretensor/talax-dictation` is the canonical source repository for TalaX. Releases are
+prepared through pull requests against `main` and published from the merge commit; there is
+no separate snapshot-export step.
 
-This split is deliberate (88→30 portfolio consolidation, Phase 2): development history and any
-internal references stay here; only reviewed release snapshots are published downstream.
-Do **not** merge the two repos — the licence boundary (private dev ↔ public BSL-1.1) depends on the separation.
+## Relationship to `puretensor/TalaX`
+
+`puretensor/TalaX` (private) was the canonical development repo until 2026-08-24. It is now
+**frozen and non-canonical**: do not develop there, do not release from it, and do not treat
+its version line as authoritative. The two repos had re-diverged in both directions, so the
+switch is recorded here rather than left implicit.
+
+One back-port is still outstanding at the time of writing — the private repo's UI layer is
+ahead on user-visible error handling (`ui/src/lib/errors.ts`), a stale-response guard for
+concurrent detail fetches (`ui/src/lib/latest-request.ts`), and four Vitest suites
+(`App.test.ts`, `routes/Editor.test.ts`, `routes/Profiles.test.ts`,
+`lib/latest-request.test.ts`). Until that lands, `Editor.svelte` here can render a stale
+session detail if two expands race, and a failed `saveCorrections` surfaces no message.
+Tracked separately; do not delete `puretensor/TalaX` until it is done.
 
 ## 1. Version and branch hygiene
 
-- Release from `master` with no unrelated changes.
-- Bump all version locations **in the same commit**:
+- Start from an up-to-date `origin/main` with no unrelated changes.
+- Bump every version location in the same commit:
   - `Cargo.toml` `[workspace.package] version`
-  - `crates/talax-app/Cargo.toml` `talax-engine` path-dep `version` pin
-  - `Cargo.lock` package entries (run `cargo update -w`)
+  - `crates/talax-app/Cargo.toml` `talax-engine` path dependency version
+  - `Cargo.lock` workspace package entries (`cargo update -w`)
   - `crates/talax-app/tauri.conf.json`
-  - `ui/package.json` and `ui/package-lock.json` (run `npm --prefix ui install` after editing)
-- Commit message leads with the version tag, e.g. `v1.2.0: Short description`. Tag `vX.Y.Z`.
+  - `ui/package.json` and `ui/package-lock.json`
+- Lead the commit message with the version, for example `v1.5.2: Short description`.
+- Open a pull request against `main`; do not tag or publish until it is reviewed and merged.
 
-## 2. Required automated checks (release gates)
+## 2. Required automated checks
 
-Run from the repository root. All must pass before export:
+Run the same gates as `.github/workflows/ci.yml` from the repository root:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo audit
 cargo deny check advisories bans sources
-cargo test --workspace
 npm --prefix ui ci
 npm --prefix ui audit --audit-level=high
 npm --prefix ui run check
@@ -35,50 +48,40 @@ npm --prefix ui test
 npm --prefix ui run build
 ```
 
-These are the same gates CI enforces (`.github/workflows/ci.yml`, shared by both repos).
+All checks must pass on the release commit.
 
-## 3. Export snapshot to the public repo
+## 3. Build and smoke-test
 
-Each release lands on `talax-dictation:main` as **one snapshot commit on top of the existing
-public history** (linear, additive — never force-push). Internal-only paths are excluded.
+After the version pull request is merged, check out its merge commit and build the desktop
+bundle:
 
 ```bash
-# from a clean checkout of this repo at the release tag
-V=X.Y.Z
-git clone --depth 1 git@github.com:puretensor/talax-dictation.git /tmp/talax-pub
-find /tmp/talax-pub -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-rsync -a \
-  --exclude='.git' --exclude='tasks/' --exclude='.simplify/' --exclude='.claude/' \
-  --exclude='target/' --exclude='ui/node_modules/' --exclude='ui/dist/' \
-  ./ /tmp/talax-pub/
-# public README carries a distribution-repo banner on top of the shared body
-{ cat <<'BANNER'
->  **Public distribution repo.** This is the public, BSL-1.1 release cut of **TalaX**.
->  Development happens in the private `puretensor/TalaX` repo; reviewed releases land here as
->  snapshot commits. Same product — one version line across both repos.
-
-BANNER
-  cat /tmp/talax-pub/README.md; } > /tmp/talax-pub/README.new && mv /tmp/talax-pub/README.new /tmp/talax-pub/README.md
-cd /tmp/talax-pub && git add -A && git commit -m "v${V}: release snapshot from TalaX" && git push origin main
-git tag "v${V}" && git push origin "v${V}"
+git switch main
+git pull --ff-only origin main
+cd crates/talax-app
+cargo tauri build
 ```
 
-(`tasks/` holds internal audit notes, `.simplify/` internal tooling — excluded from the public cut.)
+For the currently supported Linux packages, install each generated format on a clean test
+system and verify:
 
-## 4. Verify and publish
+1. TalaX starts and creates its platform-managed config and data directories.
+2. A model can be downloaded and passes its integrity check.
+3. Push-to-talk records, transcribes, and returns to the idle state.
+4. Review-first delivery copies corrected text without injecting it automatically.
+5. A correction persists after restart and the active profile can be switched.
+6. Uninstalling the package does not remove user profiles or downloaded models.
 
-1. Confirm talax-dictation CI is green on the snapshot commit.
-2. Build the desktop bundle from the tagged snapshot: `cargo tauri build` (see prerequisites in CONTRIBUTING.md / ci.yml).
-3. Run the manual smoke test (`tasks/platform_smoke_runbook.md` in this repo).
-4. Publish a GitHub release on `talax-dictation` at tag `vX.Y.Z` with the bundle artifacts.
-5. Mirror both repos to sovereign Gitea (org policy: everything mirrored GitHub ↔ Gitea).
+Do not record release artifacts in this repository.
 
-## Versioning
+## 4. Tag and publish
 
-One product, one version line: the public repo adopts the TalaX workspace version from v1.2.0
-onward (the public 0.x tags predate the unification). Follow SemVer; pre-releases use `-rc.N`.
+Once CI and the smoke test are green:
 
-## Why
+1. Tag the verified `main` commit as `vX.Y.Z` and push that tag to `origin`.
+2. Publish a GitHub release in `puretensor/talax-dictation` for that tag.
+3. Attach the Linux bundles and a `SHA256SUMS.txt` covering every artifact.
+4. Verify the release page, download links, and checksums from a clean machine.
 
-The market-facing product is `talax-dictation` (per-seat, sovereign/local-first dictation). TalaX is
-where it's built. One product, two repos with a clear licence/visibility boundary — not a duplication.
+Follow SemVer. Pre-releases use the `-rc.N` suffix and must not replace the latest stable
+release until they have passed the same gates.

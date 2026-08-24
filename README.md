@@ -1,7 +1,3 @@
->  **Public distribution repo.** This is the public, BSL-1.1 release cut of **TalaX**.
->  Development happens in the private `puretensor/TalaX` repo; reviewed releases land here as
->  snapshot commits. Same product — one version line across both repos.
-
 # TalaX
 
 [![Latest release](https://img.shields.io/github/v/release/puretensor/talax-dictation)](https://github.com/puretensor/talax-dictation/releases/latest)
@@ -198,8 +194,9 @@ tests (including config validation), frontend unit tests (vitest), and doctests.
 
 ## Release Validation
 
-- Cross-platform smoke runbook: `tasks/platform_smoke_runbook.md`
-- Smoke report template: `tasks/platform_smoke_report_template.md`
+- Automated release gates and the publication checklist are documented in [RELEASING.md](RELEASING.md).
+- Linux packages are smoke-tested after `cargo tauri build`; macOS and Windows remain
+  source-build targets until packaging workflows are added.
 - Generated Tauri schema output under `crates/talax-app/gen/` is treated as
   disposable generated output and is not committed.
 
@@ -218,7 +215,7 @@ tests (including config validation), frontend unit tests (vitest), and doctests.
 ## Project Structure
 
 ```
-talax/
+talax-dictation/
     Cargo.toml                   # Workspace: talax-engine + talax-app
     crates/
         talax-engine/         # Core library (no UI dependency)
