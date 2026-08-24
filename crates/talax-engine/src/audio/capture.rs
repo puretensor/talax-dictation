@@ -281,8 +281,8 @@ impl AudioRecorder {
         for cfg in supported_configs {
             // Prefer matching channel count.
             let channels_ok = cfg.channels() == target_channels;
-            let min = cfg.min_sample_rate().0 as i64;
-            let max = cfg.max_sample_rate().0 as i64;
+            let min = cfg.min_sample_rate() as i64;
+            let max = cfg.max_sample_rate() as i64;
             let target = self.config.sample_rate as i64;
 
             let rate_distance = if target >= min && target <= max {
@@ -296,13 +296,13 @@ impl AudioRecorder {
                 best_distance = distance;
                 // Clamp to the supported range.
                 let clamped_rate =
-                    (target as u32).clamp(cfg.min_sample_rate().0, cfg.max_sample_rate().0);
-                best_config = Some(cfg.with_sample_rate(cpal::SampleRate(clamped_rate)));
+                    (target as u32).clamp(cfg.min_sample_rate(), cfg.max_sample_rate());
+                best_config = Some(cfg.with_sample_rate(clamped_rate));
             }
         }
 
         let selected = best_config.ok_or(CaptureError::NoSuitableConfig)?;
-        let device_rate = selected.sample_rate().0;
+        let device_rate = selected.sample_rate();
         let device_channels = selected.channels() as usize;
         let sample_format = selected.sample_format();
         let target_rate_val = self.config.sample_rate;
@@ -318,7 +318,7 @@ impl AudioRecorder {
         };
 
         let pending = Arc::new(Mutex::new(Vec::with_capacity(chunk_samples * 2)));
-        let stream_config: cpal::StreamConfig = selected.clone().into();
+        let stream_config: cpal::StreamConfig = selected.into();
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => {
@@ -327,7 +327,7 @@ impl AudioRecorder {
                 let chunk_tx = chunk_tx.clone();
                 device
                     .build_input_stream(
-                        &stream_config,
+                        stream_config,
                         move |data: &[i16], _: &cpal::InputCallbackInfo| {
                             if !running.load(Ordering::Relaxed) {
                                 return;
@@ -348,7 +348,7 @@ impl AudioRecorder {
                 let chunk_tx = chunk_tx.clone();
                 device
                     .build_input_stream(
-                        &stream_config,
+                        stream_config,
                         move |data: &[u16], _: &cpal::InputCallbackInfo| {
                             if !running.load(Ordering::Relaxed) {
                                 return;
@@ -371,7 +371,7 @@ impl AudioRecorder {
                 let chunk_tx = chunk_tx.clone();
                 device
                     .build_input_stream(
-                        &stream_config,
+                        stream_config,
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
                             if !running.load(Ordering::Relaxed) {
                                 return;
