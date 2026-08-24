@@ -122,6 +122,7 @@ pub struct ModelInfo {
 // ---------------------------------------------------------------------------
 
 /// Manages Whisper GGML model files on disk.
+#[derive(Clone)]
 pub struct ModelManager {
     models_dir: PathBuf,
 }
