@@ -101,6 +101,26 @@ struct ChunkProcessor {
     trailing_limit_samples: usize,
 }
 
+fn await_capture_startup(
+    startup_rx: mpsc::Receiver<Result<(), String>>,
+    stop_flag: &AtomicBool,
+    thread: std::thread::JoinHandle<()>,
+    timeout: std::time::Duration,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    match startup_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(thread),
+        Ok(Err(err)) => {
+            let _ = thread.join();
+            Err(err)
+        }
+        Err(_) => {
+            stop_flag.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            Err("audio recorder startup timed out".to_string())
+        }
+    }
+}
+
 impl ChunkProcessor {
     fn new(audio_config: &AudioConfig, settings: CaptureSettings) -> Self {
         let pre_roll_samples =
@@ -196,17 +216,12 @@ fn spawn_capture_thread(settings: CaptureSettings) -> Result<CaptureHandle, Stri
         }
     });
 
-    match startup_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            let _ = thread.join();
-            return Err(err);
-        }
-        Err(_) => {
-            let _ = thread.join();
-            return Err("audio recorder startup timed out".to_string());
-        }
-    }
+    let thread = await_capture_startup(
+        startup_rx,
+        &stop_flag,
+        thread,
+        std::time::Duration::from_secs(5),
+    )?;
 
     Ok(CaptureHandle {
         stop_flag,
@@ -341,6 +356,37 @@ mod tests {
 
     fn chunk(amplitude: i16, len: usize) -> Vec<i16> {
         vec![amplitude; len]
+    }
+
+    #[test]
+    fn startup_timeout_stops_capture_before_joining() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = stop_flag.clone();
+        let (startup_tx, startup_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !worker_flag.load(Ordering::Relaxed)
+                && started.elapsed() < std::time::Duration::from_millis(500)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            drop(startup_tx);
+        });
+
+        let started = std::time::Instant::now();
+        let result = await_capture_startup(
+            startup_rx,
+            &stop_flag,
+            thread,
+            std::time::Duration::from_millis(10),
+        );
+
+        assert_eq!(result.unwrap_err(), "audio recorder startup timed out");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "timeout handling blocked for {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
