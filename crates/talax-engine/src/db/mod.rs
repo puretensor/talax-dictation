@@ -233,10 +233,11 @@ impl Database {
         session_id: &str,
         corrections: &[(usize, &str)],
     ) -> SqlResult<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+
         for (segment_index, corrected_text) in corrections {
             // Get the segment
-            let segment: Option<(i64, String)> = self
-                .conn
+            let segment: Option<(i64, String)> = transaction
                 .query_row(
                     "SELECT id, original_text FROM segments WHERE session_id = ?1 AND segment_index = ?2",
                     params![session_id, *segment_index as i64],
@@ -249,7 +250,7 @@ impl Database {
             };
 
             // Update the segment
-            self.conn.execute(
+            transaction.execute(
                 "UPDATE segments SET corrected_text = ?1, reviewed = 1 WHERE id = ?2",
                 params![corrected_text, segment_id],
             )?;
@@ -262,7 +263,7 @@ impl Database {
             for (position, op) in aligned.into_iter().enumerate() {
                 match op {
                     WordAlignment::Equal(word) => {
-                        self.increment_correct_usage(word)?;
+                        Self::increment_correct_usage(&transaction, word)?;
                     }
                     WordAlignment::Replace {
                         original,
@@ -272,13 +273,13 @@ impl Database {
                             continue;
                         }
 
-                        self.conn.execute(
+                        transaction.execute(
                             "INSERT INTO word_corrections (segment_id, original, corrected, position)
                              VALUES (?1, ?2, ?3, ?4)",
                             params![segment_id, original, corrected, position as i64],
                         )?;
 
-                        self.conn.execute(
+                        transaction.execute(
                             "INSERT INTO correction_patterns (original, corrected, frequency, confidence, context_before, context_after)
                              VALUES (?1, ?2, 1, 0.5, '', '')
                              ON CONFLICT(original, corrected, context_before, context_after)
@@ -291,11 +292,11 @@ impl Database {
             }
         }
 
-        self.refresh_session_review_state(session_id)?;
+        Self::refresh_session_review_state(&transaction, session_id)?;
 
         // Rebuild auto-apply flags
-        self.rebuild_auto_apply()?;
-        Ok(())
+        Self::rebuild_auto_apply(&transaction)?;
+        transaction.commit()
     }
 
     /// Stage corrected text for segments without marking them as reviewed.
@@ -331,14 +332,13 @@ impl Database {
     }
 
     /// Rebuild auto_apply flags based on frequency and confidence thresholds.
-    fn rebuild_auto_apply(&self) -> SqlResult<()> {
+    fn rebuild_auto_apply(conn: &Connection) -> SqlResult<()> {
         // First, reset all
-        self.conn
-            .execute("UPDATE correction_patterns SET auto_apply = 0", [])?;
+        conn.execute("UPDATE correction_patterns SET auto_apply = 0", [])?;
 
         // Recompute confidence using correct_usages
         // confidence = frequency / (frequency + correct_usages)
-        self.conn.execute_batch(
+        conn.execute_batch(
             "UPDATE correction_patterns SET confidence =
                 CAST(frequency AS REAL) / (frequency + COALESCE(
                     (SELECT cu.frequency FROM correct_usages cu WHERE cu.word = correction_patterns.original), 0
@@ -349,8 +349,8 @@ impl Database {
         Ok(())
     }
 
-    fn refresh_session_review_state(&self, session_id: &str) -> SqlResult<()> {
-        self.conn.execute(
+    fn refresh_session_review_state(conn: &Connection, session_id: &str) -> SqlResult<()> {
+        conn.execute(
             "UPDATE sessions
              SET reviewed = CASE
                     WHEN EXISTS(
@@ -370,13 +370,13 @@ impl Database {
         Ok(())
     }
 
-    fn increment_correct_usage(&self, word: &str) -> SqlResult<()> {
+    fn increment_correct_usage(conn: &Connection, word: &str) -> SqlResult<()> {
         let normalized = normalize_learning_word(word);
         if normalized.is_empty() {
             return Ok(());
         }
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO correct_usages (word, frequency)
              VALUES (?1, 1)
              ON CONFLICT(word)
@@ -682,6 +682,45 @@ mod tests {
 
         assert_eq!(quick_freq, 1);
         assert_eq!(fox_freq, 1);
+    }
+
+    #[test]
+    fn save_corrections_rolls_back_all_changes_on_failure() {
+        let db = Database::open_memory().unwrap();
+        db.create_session("sess1", "", 1.0).unwrap();
+        db.add_segments("sess1", &[(0.0, 1.0, "teh quick fox")])
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_correction_pattern
+                 BEFORE INSERT ON correction_patterns
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced pattern failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(
+            db.save_corrections("sess1", &[(0, "the quick fox")])
+                .is_err()
+        );
+
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
+        assert_eq!(detail.segments[0].corrected_text, None);
+        assert!(!detail.segments[0].reviewed);
+
+        let word_corrections: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM word_corrections", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let correct_usages: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM correct_usages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(word_corrections, 0);
+        assert_eq!(correct_usages, 0);
     }
 
     #[test]
