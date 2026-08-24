@@ -99,7 +99,6 @@ pub struct AppState {
     pub pipeline: CorrectionPipeline,
     pub active_profile: String,
     pub db: Option<Database>,
-    pub app_dir: PathBuf,
     pub config_dir: PathBuf,
     pub config: AppConfig,
     pub model_mgr: ModelManager,
@@ -152,7 +151,6 @@ impl AppState {
             pipeline: CorrectionPipeline::new(),
             active_profile,
             db: None,
-            app_dir,
             config_dir,
             config,
             model_mgr,
@@ -790,18 +788,20 @@ pub fn get_available_models(state: State<'_, Mutex<AppState>>) -> Vec<ModelInfo>
         .collect()
 }
 
+fn model_manager_for_download(manager: &ModelManager) -> ModelManager {
+    manager.clone()
+}
+
 #[tauri::command]
 pub async fn download_model(
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
     model_id: String,
 ) -> Result<(), String> {
-    let models_dir = {
+    let mgr = {
         let s = lock_state(&state);
-        s.app_dir.join("models")
+        model_manager_for_download(&s.model_mgr)
     };
-
-    let mgr = ModelManager::new(models_dir).map_err(|e| e.to_string())?;
 
     // Run download in a blocking task so we don't block the main thread
     let mid = model_id.clone();
@@ -1031,6 +1031,29 @@ pub fn save_app_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    fn temporary_models_dir() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "talax-app-model-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn starting_another_download_preserves_active_partial_file() {
+        let models_dir = temporary_models_dir();
+        let manager = ModelManager::new(models_dir.clone()).unwrap();
+        let active_partial = models_dir.join("ggml-tiny.en.bin.part");
+        std::fs::write(&active_partial, b"download in progress").unwrap();
+
+        let _second_manager = model_manager_for_download(&manager);
+
+        assert!(active_partial.exists());
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
 
     #[test]
     fn config_validation_accepts_default_config() {

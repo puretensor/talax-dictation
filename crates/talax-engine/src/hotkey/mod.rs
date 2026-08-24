@@ -267,14 +267,14 @@ pub struct HotkeyHandle {
 }
 
 impl HotkeyHandle {
-    /// Signal the listener thread to stop and wait for it to finish.
+    /// Signal the listener thread to stop and detach it.
+    ///
+    /// `rdev::listen` has no shutdown API and remains blocked inside the OS
+    /// event loop. Joining that thread would therefore block the caller until
+    /// another event or process shutdown, so dropping the handle is deliberate.
     pub fn stop(mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.thread.take() {
-            // The rdev loop may not exit instantly (it blocks on OS events),
-            // so we just signal and detach rather than blocking indefinitely.
-            let _ = handle.join();
-        }
+        self.thread.take();
     }
 }
 
@@ -452,6 +452,30 @@ pub fn parse_hotkey(s: &str) -> Result<HotkeyConfig, HotkeyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_does_not_wait_for_an_unstoppable_listener() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            thread::sleep(std::time::Duration::from_millis(500));
+        });
+        started_rx.recv().unwrap();
+
+        let handle = HotkeyHandle {
+            stop_flag,
+            thread: Some(thread),
+        };
+        let started = std::time::Instant::now();
+        handle.stop();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "stop blocked for {:?}",
+            started.elapsed()
+        );
+    }
 
     // -- parse_hotkey valid inputs -----------------------------------------
 
