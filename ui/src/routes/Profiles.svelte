@@ -1,16 +1,27 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import {
-    getProfiles,
     createProfile,
     switchProfile,
     cloneProfile,
     deleteProfile,
     resetProfile,
-    getAppConfig,
   } from "../lib/api";
-  let profiles: string[] = $state([]);
-  let activeProfile = $state("default");
-  let loading = $state(true);
+  import { formatError } from "../lib/errors";
+
+  let {
+    profiles,
+    activeProfile,
+    loading,
+    onprofilechange,
+    onprofileschanged,
+  }: {
+    profiles: string[];
+    activeProfile: string;
+    loading: boolean;
+    onprofilechange: (activeProfile: string) => void;
+    onprofileschanged: () => Promise<void>;
+  } = $props();
 
   // Modal state
   let showCreateModal = $state(false);
@@ -19,110 +30,215 @@
   let newName = $state("");
   let cloneSource = $state("");
   let cloneName = $state("");
-  let confirmAction = $state<{ label: string; action: () => Promise<void> } | null>(null);
+  let confirmAction = $state<{
+    label: string;
+    failureLabel: string;
+    successMessage: string;
+    action: () => Promise<void>;
+  } | null>(null);
   let actionMessage = $state("");
+  let actionError = $state(false);
+  let createPending = $state(false);
+  let clonePending = $state(false);
+  let confirmPending = $state(false);
+  let switchingProfile = $state<string | null>(null);
+  let actionMessageTimer: ReturnType<typeof setTimeout> | null = null;
+  let destroyed = false;
 
-  async function loadProfiles() {
-    loading = true;
-    const [p, cfg] = await Promise.all([getProfiles(), getAppConfig()]);
-    profiles = p;
-    activeProfile = cfg.active_profile;
-    loading = false;
+  async function handleCreate(): Promise<void> {
+    const name = newName.trim();
+    if (!name || createPending) return;
+    createPending = true;
+    clearMessage();
+    try {
+      await createProfile(name);
+      newName = "";
+      showCreateModal = false;
+      try {
+        await onprofileschanged();
+        showMessage("Profile created");
+      } catch (error) {
+        showError(`Profile created, but refresh failed: ${formatError(error)}`);
+      }
+    } catch (error) {
+      showError(`Create profile failed: ${formatError(error)}`);
+    } finally {
+      createPending = false;
+    }
   }
 
-  loadProfiles();
-
-  async function handleCreate() {
-    if (!newName.trim()) return;
-    await createProfile(newName.trim());
-    newName = "";
-    showCreateModal = false;
-    await loadProfiles();
-    showMessage("Profile created");
+  async function handleSwitch(name: string): Promise<void> {
+    if (switchingProfile !== null || name === activeProfile) return;
+    switchingProfile = name;
+    clearMessage();
+    try {
+      await switchProfile(name);
+      onprofilechange(name);
+      showMessage(`Switched to "${name}"`);
+    } catch (error) {
+      showError(`Switch profile failed: ${formatError(error)}`);
+    } finally {
+      switchingProfile = null;
+    }
   }
 
-  async function handleSwitch(name: string) {
-    await switchProfile(name);
-    activeProfile = name;
-    showMessage(`Switched to "${name}"`);
-  }
-
-  function openClone(source: string) {
+  function openClone(source: string): void {
+    if (clonePending) return;
+    clearMessage();
     cloneSource = source;
     cloneName = source + "-copy";
     showCloneModal = true;
   }
 
-  async function handleClone() {
-    if (!cloneName.trim()) return;
-    await cloneProfile(cloneSource, cloneName.trim());
-    cloneName = "";
-    showCloneModal = false;
-    await loadProfiles();
-    showMessage("Profile cloned");
+  async function handleClone(): Promise<void> {
+    const target = cloneName.trim();
+    if (!target || clonePending) return;
+    clonePending = true;
+    clearMessage();
+    try {
+      await cloneProfile(cloneSource, target);
+      cloneName = "";
+      showCloneModal = false;
+      try {
+        await onprofileschanged();
+        showMessage("Profile cloned");
+      } catch (error) {
+        showError(`Profile cloned, but refresh failed: ${formatError(error)}`);
+      }
+    } catch (error) {
+      showError(`Clone profile failed: ${formatError(error)}`);
+    } finally {
+      clonePending = false;
+    }
   }
 
-  function confirmDelete(name: string) {
+  function confirmDelete(name: string): void {
+    if (confirmPending) return;
+    clearMessage();
     confirmAction = {
       label: `Delete profile "${name}"? This cannot be undone.`,
-      action: async () => {
-        await deleteProfile(name);
-        await loadProfiles();
-        showMessage("Profile deleted");
-      },
+      failureLabel: "Delete profile",
+      successMessage: "Profile deleted",
+      action: () => deleteProfile(name),
     };
     showConfirmModal = true;
   }
 
-  function confirmReset(name: string) {
+  function confirmReset(name: string): void {
+    if (confirmPending) return;
+    clearMessage();
     confirmAction = {
       label: `Reset profile "${name}"? All learned patterns and settings will be cleared.`,
-      action: async () => {
-        await resetProfile(name);
-        await loadProfiles();
-        showMessage("Profile reset");
-      },
+      failureLabel: "Reset profile",
+      successMessage: "Profile reset",
+      action: () => resetProfile(name),
     };
     showConfirmModal = true;
   }
 
-  async function executeConfirm() {
-    if (confirmAction) {
-      await confirmAction.action();
+  async function executeConfirm(): Promise<void> {
+    if (!confirmAction || confirmPending) return;
+    const pendingAction = confirmAction;
+    confirmPending = true;
+    clearMessage();
+    try {
+      await pendingAction.action();
+      showConfirmModal = false;
+      confirmAction = null;
+      try {
+        await onprofileschanged();
+        showMessage(pendingAction.successMessage);
+      } catch (error) {
+        showError(
+          `${pendingAction.successMessage}, but refresh failed: ${formatError(error)}`
+        );
+      }
+    } catch (error) {
+      showError(`${pendingAction.failureLabel} failed: ${formatError(error)}`);
+    } finally {
+      confirmPending = false;
     }
+  }
+
+  function cancelConfirm(): void {
+    if (confirmPending) return;
     showConfirmModal = false;
     confirmAction = null;
   }
 
-  function cancelConfirm() {
-    showConfirmModal = false;
-    confirmAction = null;
+  function openCreate(): void {
+    if (createPending) return;
+    clearMessage();
+    showCreateModal = true;
   }
 
-  function showMessage(msg: string) {
+  function closeCreate(): void {
+    if (!createPending) showCreateModal = false;
+  }
+
+  function closeClone(): void {
+    if (!clonePending) showCloneModal = false;
+  }
+
+  function clearMessageTimer(): void {
+    if (actionMessageTimer !== null) {
+      clearTimeout(actionMessageTimer);
+      actionMessageTimer = null;
+    }
+  }
+
+  function showMessage(msg: string): void {
+    clearMessageTimer();
+    if (destroyed) return;
     actionMessage = msg;
-    setTimeout(() => (actionMessage = ""), 2000);
+    actionError = false;
+    actionMessageTimer = setTimeout(() => {
+      actionMessage = "";
+      actionMessageTimer = null;
+    }, 2000);
   }
 
-  function handleCreateKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") handleCreate();
-    else if (e.key === "Escape") showCreateModal = false;
+  function showError(msg: string): void {
+    clearMessageTimer();
+    if (destroyed) return;
+    actionMessage = msg;
+    actionError = true;
   }
 
-  function handleCloneKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") handleClone();
-    else if (e.key === "Escape") showCloneModal = false;
+  function clearMessage(): void {
+    clearMessageTimer();
+    actionMessage = "";
+    actionError = false;
   }
+
+  function handleCreateKeydown(e: KeyboardEvent): void {
+    if (e.key === "Enter") void handleCreate();
+    else if (e.key === "Escape") closeCreate();
+  }
+
+  function handleCloneKeydown(e: KeyboardEvent): void {
+    if (e.key === "Enter") void handleClone();
+    else if (e.key === "Escape") closeClone();
+  }
+
+  onDestroy(() => {
+    destroyed = true;
+    clearMessageTimer();
+  });
 </script>
 
 <div class="profiles-view">
   <div class="header-row">
     <h2>Voice Profiles</h2>
     <div class="header-actions">
-      {#if actionMessage}
-        <span class="action-msg">{actionMessage}</span>
+      {#if actionMessage && !showCreateModal && !showCloneModal && !showConfirmModal}
+        <span
+          class="action-msg"
+          class:error={actionError}
+          role={actionError ? "alert" : undefined}
+        >{actionMessage}</span>
       {/if}
-      <button class="btn primary" onclick={() => (showCreateModal = true)}>
+      <button class="btn primary" onclick={openCreate} disabled={createPending}>
         Create New
       </button>
     </div>
@@ -148,20 +264,33 @@
           </div>
           <div class="profile-actions">
             {#if name !== activeProfile}
-              <button class="btn small" onclick={() => handleSwitch(name)}>
+              <button
+                class="btn small"
+                onclick={() => handleSwitch(name)}
+                disabled={switchingProfile !== null}
+              >
                 Switch
               </button>
             {/if}
-            <button class="btn small" onclick={() => openClone(name)}>
+            <button
+              class="btn small"
+              onclick={() => openClone(name)}
+              disabled={clonePending}
+            >
               Clone
             </button>
-            <button class="btn small" onclick={() => confirmReset(name)}>
+            <button
+              class="btn small"
+              onclick={() => confirmReset(name)}
+              disabled={confirmPending}
+            >
               Reset
             </button>
             {#if name !== activeProfile && name !== "default"}
               <button
                 class="btn small danger"
                 onclick={() => confirmDelete(name)}
+                disabled={confirmPending}
               >
                 Delete
               </button>
@@ -176,7 +305,7 @@
 <!-- Create Modal -->
 {#if showCreateModal}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="modal-overlay" onclick={() => (showCreateModal = false)} onkeydown={(e) => { if (e.key === 'Escape') showCreateModal = false; }} role="presentation">
+  <div class="modal-overlay" onclick={closeCreate} onkeydown={(e) => { if (e.key === 'Escape') closeCreate(); }} role="presentation">
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-label="Create new profile">
       <h3>Create New Profile</h3>
@@ -189,9 +318,12 @@
         onkeydown={handleCreateKeydown}
         autofocus
       />
+      {#if actionError}
+        <p class="modal-error" role="alert">{actionMessage}</p>
+      {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={() => (showCreateModal = false)}>Cancel</button>
-        <button class="btn primary" onclick={handleCreate} disabled={!newName.trim()}>
+        <button class="btn" onclick={closeCreate} disabled={createPending}>Cancel</button>
+        <button class="btn primary" onclick={handleCreate} disabled={!newName.trim() || createPending}>
           Create
         </button>
       </div>
@@ -202,7 +334,7 @@
 <!-- Clone Modal -->
 {#if showCloneModal}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="modal-overlay" onclick={() => (showCloneModal = false)} onkeydown={(e) => { if (e.key === 'Escape') showCloneModal = false; }} role="presentation">
+  <div class="modal-overlay" onclick={closeClone} onkeydown={(e) => { if (e.key === 'Escape') closeClone(); }} role="presentation">
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-label="Clone profile">
       <h3>Clone Profile "{cloneSource}"</h3>
@@ -215,9 +347,12 @@
         onkeydown={handleCloneKeydown}
         autofocus
       />
+      {#if actionError}
+        <p class="modal-error" role="alert">{actionMessage}</p>
+      {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={() => (showCloneModal = false)}>Cancel</button>
-        <button class="btn primary" onclick={handleClone} disabled={!cloneName.trim()}>
+        <button class="btn" onclick={closeClone} disabled={clonePending}>Cancel</button>
+        <button class="btn primary" onclick={handleClone} disabled={!cloneName.trim() || clonePending}>
           Clone
         </button>
       </div>
@@ -233,9 +368,14 @@
     <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-label="Confirm action">
       <h3>Confirm</h3>
       <p class="confirm-text">{confirmAction.label}</p>
+      {#if actionError}
+        <p class="modal-error" role="alert">{actionMessage}</p>
+      {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={cancelConfirm}>Cancel</button>
-        <button class="btn danger" onclick={executeConfirm}>Confirm</button>
+        <button class="btn" onclick={cancelConfirm} disabled={confirmPending}>Cancel</button>
+        <button class="btn danger" onclick={executeConfirm} disabled={confirmPending}>
+          Confirm
+        </button>
       </div>
     </div>
   </div>
@@ -268,6 +408,10 @@
   .action-msg {
     font-size: 13px;
     color: var(--green, #3fb950);
+  }
+
+  .action-msg.error {
+    color: var(--red, #f85149);
   }
 
   .empty-state {
@@ -360,7 +504,7 @@
     background: transparent;
   }
 
-  .btn.danger:hover {
+  .btn.danger:hover:not(:disabled) {
     background: rgba(248, 81, 73, 0.1);
   }
 
@@ -416,6 +560,12 @@
     font-size: 14px;
     margin: 0 0 16px;
     line-height: 1.5;
+  }
+
+  .modal-error {
+    color: var(--red, #f85149);
+    font-size: 13px;
+    margin: 0 0 16px;
   }
 
   .modal-actions {

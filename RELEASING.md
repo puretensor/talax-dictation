@@ -11,13 +11,10 @@ no separate snapshot-export step.
 its version line as authoritative. The two repos had re-diverged in both directions, so the
 switch is recorded here rather than left implicit.
 
-One back-port is still outstanding at the time of writing — the private repo's UI layer is
-ahead on user-visible error handling (`ui/src/lib/errors.ts`), a stale-response guard for
-concurrent detail fetches (`ui/src/lib/latest-request.ts`), and four Vitest suites
-(`App.test.ts`, `routes/Editor.test.ts`, `routes/Profiles.test.ts`,
-`lib/latest-request.test.ts`). Until that lands, `Editor.svelte` here can render a stale
-session detail if two expands race, and a failed `saveCorrections` surfaces no message.
-Tracked separately; do not delete `puretensor/TalaX` until it is done.
+Version 1.6.0 completed the remaining UI back-port: shared error formatting, request-generation
+guards for concurrent session fetches, App-owned profile state, and the four Vitest suites
+covering those contracts. `puretensor/TalaX` may be archived after this release commit and
+the back-ported files are confirmed on the canonical upstream `main`; never release from it.
 
 ## 1. Version and branch hygiene
 

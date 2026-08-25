@@ -1,49 +1,93 @@
 <script lang="ts">
   import { getAppConfig, getProfiles, switchProfile } from "./lib/api";
+  import { formatError } from "./lib/errors";
+  import { LatestRequest } from "./lib/latest-request";
   import Dictate from "./routes/Dictate.svelte";
   import Editor from "./routes/Editor.svelte";
   import Patterns from "./routes/Patterns.svelte";
   import Profiles from "./routes/Profiles.svelte";
   import Stats from "./routes/Stats.svelte";
   import Settings from "./routes/Settings.svelte";
-  import Onboarding from "./routes/Onboarding.svelte";
 
   let currentView = $state("dictate");
   let profiles: string[] = $state([]);
   let activeProfile = $state("default");
-  let showOnboarding = $state(false);
+  let profilesLoading = $state(true);
+  let profileSwitchPending = $state(false);
+  let profileError = $state("");
+  const profileLoads = new LatestRequest();
 
-  async function loadProfiles() {
-    const [availableProfiles, config] = await Promise.all([
-      getProfiles(),
-      getAppConfig(),
-    ]);
-    profiles = availableProfiles;
-    if (profiles.length > 0) {
-      activeProfile = profiles.includes(config.active_profile)
-        ? config.active_profile
-        : profiles[0];
+  async function loadProfiles(surfaceError = true): Promise<void> {
+    const request = profileLoads.begin();
+    profilesLoading = true;
+    profileError = "";
+
+    try {
+      const [availableProfiles, config] = await Promise.all([
+        getProfiles(),
+        getAppConfig(),
+      ]);
+      if (!profileLoads.isCurrent(request)) return;
+
+      profiles = availableProfiles;
+      if (profiles.length > 0) {
+        activeProfile = profiles.includes(config.active_profile)
+          ? config.active_profile
+          : profiles[0];
+      }
+    } catch (error) {
+      if (!profileLoads.isCurrent(request)) return;
+      if (surfaceError) {
+        profileError = `Load profiles failed: ${formatError(error)}`;
+      }
+      throw error;
+    } finally {
+      if (profileLoads.isCurrent(request)) {
+        profilesLoading = false;
+      }
     }
   }
 
-  async function handleProfileChange(nextProfile: string) {
-    if (!nextProfile || nextProfile === activeProfile) return;
-    await switchProfile(nextProfile);
-    activeProfile = nextProfile;
+  async function handleProfileChange(
+    nextProfile: string,
+    select: HTMLSelectElement
+  ): Promise<void> {
+    if (
+      !nextProfile ||
+      nextProfile === activeProfile ||
+      profilesLoading ||
+      profileSwitchPending
+    ) {
+      select.value = activeProfile;
+      return;
+    }
+
+    profileSwitchPending = true;
+    profileError = "";
+    try {
+      await switchProfile(nextProfile);
+      activeProfile = nextProfile;
+    } catch (error) {
+      select.value = activeProfile;
+      profileError = `Switch profile failed: ${formatError(error)}`;
+    } finally {
+      profileSwitchPending = false;
+    }
   }
 
-  function completeOnboarding() {
-    showOnboarding = false;
-    loadProfiles();
+  function setActiveProfile(nextActiveProfile: string): void {
+    activeProfile = nextActiveProfile;
+    profileError = "";
   }
 
-  loadProfiles();
+  async function refreshProfiles(): Promise<void> {
+    await loadProfiles(false);
+  }
+
+  void loadProfiles().catch(() => undefined);
 </script>
 
-{#if showOnboarding}
-  <Onboarding oncomplete={completeOnboarding} />
-{:else}
-  <div class="app">
+<div class="app">
     <nav class="sidebar">
       <div class="logo">
         <h1>TalaX</h1>
@@ -76,18 +120,24 @@
         <select
           id="profile-selector"
           value={activeProfile}
-          onchange={(e) =>
-            handleProfileChange((e.target as HTMLSelectElement).value)}
+          disabled={profilesLoading || profileSwitchPending}
+          onchange={(e) => {
+            const select = e.target as HTMLSelectElement;
+            void handleProfileChange(select.value, select);
+          }}
         >
           {#each profiles as p}
             <option value={p}>{p}</option>
           {/each}
         </select>
+        {#if profileError}
+          <span class="profile-error" role="alert">{profileError}</span>
+        {/if}
       </div>
     </nav>
 
     <main class="content">
-      {#key `${currentView}:${activeProfile}`}
+      {#key currentView === "profiles" ? currentView : `${currentView}:${activeProfile}`}
         {#if currentView === "dictate"}
           <Dictate />
         {:else if currentView === "editor"}
@@ -95,7 +145,13 @@
         {:else if currentView === "patterns"}
           <Patterns />
         {:else if currentView === "profiles"}
-          <Profiles />
+          <Profiles
+            {profiles}
+            {activeProfile}
+            loading={profilesLoading}
+            onprofilechange={setActiveProfile}
+            onprofileschanged={refreshProfiles}
+          />
         {:else if currentView === "stats"}
           <Stats />
         {:else if currentView === "settings"}
@@ -104,7 +160,6 @@
       {/key}
     </main>
   </div>
-{/if}
 
 <style>
   :global(body) {
@@ -195,6 +250,14 @@
     border-radius: 6px;
     padding: 4px 8px;
     font-size: 13px;
+  }
+
+  .profile-error {
+    display: block;
+    margin-top: 6px;
+    color: #f85149;
+    font-size: 11px;
+    line-height: 1.3;
   }
 
   .content {

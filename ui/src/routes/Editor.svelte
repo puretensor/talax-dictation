@@ -2,32 +2,72 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import { getSessions, getSession, saveCorrections } from "../lib/api";
-  import type { SessionSummary, SessionDetail, SegmentDetail } from "../lib/api";
+  import { formatError } from "../lib/errors";
+  import { LatestRequest } from "../lib/latest-request";
+  import type { SessionSummary, SessionDetail } from "../lib/api";
 
   let sessions: SessionSummary[] = $state([]);
   let expandedId: string | null = $state(null);
   let expandedDetail: SessionDetail | null = $state(null);
   let editedTexts: Map<string, Map<number, string>> = $state(new Map());
-  let saving = $state(false);
+  let savingSessions: Set<string> = $state(new Set());
   let saveMessage = $state("");
+  let saveMessageSessionId: string | null = $state(null);
+  let saveError = $state(false);
   let loading = $state(true);
   let loadingDetail = $state(false);
+  let saveMessageTimer: ReturnType<typeof setTimeout> | null = null;
+  let destroyed = false;
+  const sessionRequests = new LatestRequest();
+  const detailRequests = new LatestRequest();
 
-  async function loadSessions() {
-    loading = true;
-    sessions = await getSessions();
-    loading = false;
+  async function loadSessions(showLoading = true): Promise<boolean> {
+    const request = sessionRequests.begin();
+    if (showLoading) loading = true;
+    try {
+      const nextSessions = await getSessions();
+      if (!sessionRequests.isCurrent(request)) return false;
+      sessions = nextSessions;
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (sessionRequests.isCurrent(request)) loading = false;
+    }
   }
 
-  async function toggleSession(id: string) {
+  async function loadExpandedDetail(
+    id: string,
+    showLoading = true
+  ): Promise<boolean> {
+    const request = detailRequests.begin();
+    if (showLoading) loadingDetail = true;
+    try {
+      const detail = await getSession(id);
+      if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
+      expandedDetail = detail;
+      return true;
+    } catch {
+      if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
+      expandedDetail = null;
+      return false;
+    } finally {
+      if (detailRequests.isCurrent(request) && expandedId === id) {
+        loadingDetail = false;
+      }
+    }
+  }
+
+  async function toggleSession(id: string): Promise<void> {
     if (expandedId === id) {
+      detailRequests.invalidate();
       expandedId = null;
       expandedDetail = null;
+      loadingDetail = false;
     } else {
       expandedId = id;
-      loadingDetail = true;
-      expandedDetail = await getSession(id);
-      loadingDetail = false;
+      expandedDetail = null;
+      await loadExpandedDetail(id);
     }
   }
 
@@ -42,34 +82,100 @@
 
   function updateSegmentText(sessionId: string, segIndex: number, value: string) {
     const newMap = new Map(editedTexts);
-    if (!newMap.has(sessionId)) {
-      newMap.set(sessionId, new Map());
-    }
-    newMap.get(sessionId)!.set(segIndex, value);
+    const sessionEdits = new Map(newMap.get(sessionId) ?? []);
+    sessionEdits.set(segIndex, value);
+    newMap.set(sessionId, sessionEdits);
     editedTexts = newMap;
   }
 
-  async function handleSave(sessionId: string) {
-    const sessionEdits = editedTexts.get(sessionId);
-    if (!sessionEdits || sessionEdits.size === 0) return;
+  function isSaving(sessionId: string): boolean {
+    return savingSessions.has(sessionId);
+  }
 
-    saving = true;
-    try {
-      const corrections = Array.from(sessionEdits.entries()).map(
-        ([segment_index, corrected_text]) => ({ segment_index, corrected_text })
-      );
-      await saveCorrections(sessionId, corrections);
-      await loadSessions();
-      if (expandedId === sessionId) {
-        expandedDetail = await getSession(sessionId);
+  function setSaving(sessionId: string, saving: boolean): void {
+    const next = new Set(savingSessions);
+    if (saving) next.add(sessionId);
+    else next.delete(sessionId);
+    savingSessions = next;
+  }
+
+  function clearSaveMessageTimer(): void {
+    if (saveMessageTimer !== null) {
+      clearTimeout(saveMessageTimer);
+      saveMessageTimer = null;
+    }
+  }
+
+  function showSaveMessage(
+    message: string,
+    error: boolean,
+    sessionId: string
+  ): void {
+    clearSaveMessageTimer();
+    if (destroyed) return;
+    saveMessage = message;
+    saveMessageSessionId = sessionId;
+    saveError = error;
+    if (!error) {
+      saveMessageTimer = setTimeout(() => {
+        saveMessage = "";
+        saveMessageSessionId = null;
+        saveMessageTimer = null;
+      }, 2000);
+    }
+  }
+
+  function removeSubmittedEdits(
+    sessionId: string,
+    submittedEdits: Map<number, string>
+  ): void {
+    const currentEdits = editedTexts.get(sessionId);
+    if (!currentEdits) return;
+
+    const remaining = new Map(currentEdits);
+    for (const [segmentIndex, submittedText] of submittedEdits) {
+      if (remaining.get(segmentIndex) === submittedText) {
+        remaining.delete(segmentIndex);
       }
-      const nextEdits = new Map(editedTexts);
-      nextEdits.delete(sessionId);
-      editedTexts = nextEdits;
-      saveMessage = "Corrections saved";
-      setTimeout(() => (saveMessage = ""), 2000);
+    }
+
+    const nextEdits = new Map(editedTexts);
+    if (remaining.size === 0) nextEdits.delete(sessionId);
+    else nextEdits.set(sessionId, remaining);
+    editedTexts = nextEdits;
+  }
+
+  async function handleSave(sessionId: string): Promise<void> {
+    const sessionEdits = editedTexts.get(sessionId);
+    if (!sessionEdits || sessionEdits.size === 0 || isSaving(sessionId)) return;
+
+    setSaving(sessionId, true);
+    clearSaveMessageTimer();
+    if (!saveError) {
+      saveMessage = "";
+      saveMessageSessionId = null;
+    }
+    const submittedEdits = new Map(sessionEdits);
+    const corrections = Array.from(submittedEdits.entries()).map(
+      ([segment_index, corrected_text]) => ({ segment_index, corrected_text })
+    );
+    try {
+      try {
+        await saveCorrections(sessionId, corrections);
+      } catch (error) {
+        showSaveMessage(`Save failed: ${formatError(error)}`, true, sessionId);
+        return;
+      }
+
+      removeSubmittedEdits(sessionId, submittedEdits);
+      if (destroyed) return;
+      const sessionsCurrent = await loadSessions(false);
+      if (sessionsCurrent && expandedId === sessionId) {
+        await loadExpandedDetail(sessionId, false);
+      }
+      showSaveMessage("Corrections saved", false, sessionId);
     } finally {
-      saving = false;
+      setSaving(sessionId, false);
     }
   }
 
@@ -94,22 +200,38 @@
   }
 
   onMount(() => {
-    loadSessions();
+    void loadSessions();
     const unlisten = listen("profile-data-changed", async () => {
-      await loadSessions();
-      if (expandedId) {
-        expandedDetail = await getSession(expandedId);
-      }
+      const sessionsCurrent = await loadSessions();
+      if (!sessionsCurrent) return;
+      const id = expandedId;
+      if (id) await loadExpandedDetail(id);
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      destroyed = true;
+      sessionRequests.invalidate();
+      detailRequests.invalidate();
+      clearSaveMessageTimer();
+      void unlisten.then((fn) => fn());
     };
   });
 </script>
 
 <div class="editor-view">
   <h2>Sessions</h2>
+
+  {#if saveMessage}
+    <p
+      class="save-message editor-feedback"
+      class:error={saveError}
+      role={saveError ? "alert" : undefined}
+    >
+      {saveMessage}{#if saveError && saveMessageSessionId}
+        <span class="save-session"> (Session: {saveMessageSessionId})</span>
+      {/if}
+    </p>
+  {/if}
 
   {#if loading}
     <div class="empty-state">Loading sessions...</div>
@@ -177,13 +299,10 @@
                   <button
                     class="save-btn"
                     onclick={() => handleSave(session.id)}
-                    disabled={saving || !hasEdits(session.id)}
+                    disabled={isSaving(session.id) || !hasEdits(session.id)}
                   >
-                    {saving ? "Saving..." : "Save Corrections"}
+                    {isSaving(session.id) ? "Saving..." : "Save Corrections"}
                   </button>
-                  {#if saveMessage}
-                    <span class="save-message">{saveMessage}</span>
-                  {/if}
                 </div>
               {/if}
             </div>
@@ -371,5 +490,17 @@
   .save-message {
     font-size: 13px;
     color: var(--green, #3fb950);
+  }
+
+  .editor-feedback {
+    margin: -12px 0 20px;
+  }
+
+  .save-message.error {
+    color: var(--red, #f85149);
+  }
+
+  .save-session {
+    font-weight: 600;
   }
 </style>
