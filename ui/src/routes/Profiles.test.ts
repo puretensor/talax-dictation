@@ -181,4 +181,32 @@ describe("Profiles mutation failures", () => {
     remove.resolve(undefined);
     expect(await screen.findByText("Profile deleted")).toBeTruthy();
   });
+
+  it("blocks conflicting profile actions while any mutation is pending", async () => {
+    const pendingSwitch = deferred<void>();
+    api.switchProfile.mockReturnValue(pendingSwitch.promise);
+    const onmutationpending = vi.fn();
+    render(Profiles, {
+      props: {
+        profiles: ["default", "work"],
+        activeProfile: "default",
+        loading: false,
+        onprofilechange: vi.fn(),
+        onprofileschanged: vi.fn().mockResolvedValue(undefined),
+        onmutationpending,
+      },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "Switch" }));
+    expect(api.switchProfile).toHaveBeenCalledTimes(1);
+    expect(onmutationpending).toHaveBeenCalledWith(true);
+    for (const button of screen.getAllByRole("button")) {
+      if (["Create New", "Switch", "Clone", "Reset", "Delete"].includes(button.textContent?.trim() ?? "")) {
+        expect(button.hasAttribute("disabled")).toBe(true);
+      }
+    }
+
+    pendingSwitch.resolve(undefined);
+    await waitFor(() => expect(onmutationpending).toHaveBeenLastCalledWith(false));
+  });
 });

@@ -15,12 +15,16 @@
     loading,
     onprofilechange,
     onprofileschanged,
+    onmutationpending = () => undefined,
+    blocked = false,
   }: {
     profiles: string[];
     activeProfile: string;
     loading: boolean;
     onprofilechange: (activeProfile: string) => void;
     onprofileschanged: () => Promise<void>;
+    onmutationpending?: (pending: boolean) => void;
+    blocked?: boolean;
   } = $props();
 
   // Modal state
@@ -38,22 +42,21 @@
   } | null>(null);
   let actionMessage = $state("");
   let actionError = $state(false);
-  let createPending = $state(false);
-  let clonePending = $state(false);
-  let confirmPending = $state(false);
-  let switchingProfile = $state<string | null>(null);
+  let mutationPending = $state(false);
+  let controlsBlocked = $derived(blocked || mutationPending);
   let actionMessageTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
 
   async function handleCreate(): Promise<void> {
     const name = newName.trim();
-    if (!name || createPending) return;
-    createPending = true;
+    if (!name || !beginMutation()) return;
     clearMessage();
     try {
       await createProfile(name);
-      newName = "";
-      showCreateModal = false;
+      if (!destroyed) {
+        newName = "";
+        showCreateModal = false;
+      }
       try {
         await onprofileschanged();
         showMessage("Profile created");
@@ -63,13 +66,12 @@
     } catch (error) {
       showError(`Create profile failed: ${formatError(error)}`);
     } finally {
-      createPending = false;
+      endMutation();
     }
   }
 
   async function handleSwitch(name: string): Promise<void> {
-    if (switchingProfile !== null || name === activeProfile) return;
-    switchingProfile = name;
+    if (name === activeProfile || !beginMutation()) return;
     clearMessage();
     try {
       await switchProfile(name);
@@ -78,12 +80,12 @@
     } catch (error) {
       showError(`Switch profile failed: ${formatError(error)}`);
     } finally {
-      switchingProfile = null;
+      endMutation();
     }
   }
 
   function openClone(source: string): void {
-    if (clonePending) return;
+    if (controlsBlocked) return;
     clearMessage();
     cloneSource = source;
     cloneName = source + "-copy";
@@ -92,13 +94,14 @@
 
   async function handleClone(): Promise<void> {
     const target = cloneName.trim();
-    if (!target || clonePending) return;
-    clonePending = true;
+    if (!target || !beginMutation()) return;
     clearMessage();
     try {
       await cloneProfile(cloneSource, target);
-      cloneName = "";
-      showCloneModal = false;
+      if (!destroyed) {
+        cloneName = "";
+        showCloneModal = false;
+      }
       try {
         await onprofileschanged();
         showMessage("Profile cloned");
@@ -108,12 +111,12 @@
     } catch (error) {
       showError(`Clone profile failed: ${formatError(error)}`);
     } finally {
-      clonePending = false;
+      endMutation();
     }
   }
 
   function confirmDelete(name: string): void {
-    if (confirmPending) return;
+    if (controlsBlocked) return;
     clearMessage();
     confirmAction = {
       label: `Delete profile "${name}"? This cannot be undone.`,
@@ -125,7 +128,7 @@
   }
 
   function confirmReset(name: string): void {
-    if (confirmPending) return;
+    if (controlsBlocked) return;
     clearMessage();
     confirmAction = {
       label: `Reset profile "${name}"? All learned patterns and settings will be cleared.`,
@@ -137,14 +140,15 @@
   }
 
   async function executeConfirm(): Promise<void> {
-    if (!confirmAction || confirmPending) return;
+    if (!confirmAction || !beginMutation()) return;
     const pendingAction = confirmAction;
-    confirmPending = true;
     clearMessage();
     try {
       await pendingAction.action();
-      showConfirmModal = false;
-      confirmAction = null;
+      if (!destroyed) {
+        showConfirmModal = false;
+        confirmAction = null;
+      }
       try {
         await onprofileschanged();
         showMessage(pendingAction.successMessage);
@@ -156,28 +160,41 @@
     } catch (error) {
       showError(`${pendingAction.failureLabel} failed: ${formatError(error)}`);
     } finally {
-      confirmPending = false;
+      endMutation();
     }
   }
 
   function cancelConfirm(): void {
-    if (confirmPending) return;
+    if (mutationPending) return;
     showConfirmModal = false;
     confirmAction = null;
   }
 
   function openCreate(): void {
-    if (createPending) return;
+    if (controlsBlocked) return;
     clearMessage();
     showCreateModal = true;
   }
 
   function closeCreate(): void {
-    if (!createPending) showCreateModal = false;
+    if (!mutationPending) showCreateModal = false;
   }
 
   function closeClone(): void {
-    if (!clonePending) showCloneModal = false;
+    if (!mutationPending) showCloneModal = false;
+  }
+
+  function beginMutation(): boolean {
+    if (blocked || mutationPending || destroyed) return false;
+    mutationPending = true;
+    onmutationpending(true);
+    return true;
+  }
+
+  function endMutation(): void {
+    if (!mutationPending) return;
+    mutationPending = false;
+    onmutationpending(false);
   }
 
   function clearMessageTimer(): void {
@@ -238,7 +255,7 @@
           role={actionError ? "alert" : undefined}
         >{actionMessage}</span>
       {/if}
-      <button class="btn primary" onclick={openCreate} disabled={createPending}>
+      <button class="btn primary" onclick={openCreate} disabled={controlsBlocked}>
         Create New
       </button>
     </div>
@@ -267,7 +284,7 @@
               <button
                 class="btn small"
                 onclick={() => handleSwitch(name)}
-                disabled={switchingProfile !== null}
+                disabled={controlsBlocked}
               >
                 Switch
               </button>
@@ -275,14 +292,14 @@
             <button
               class="btn small"
               onclick={() => openClone(name)}
-              disabled={clonePending}
+              disabled={controlsBlocked}
             >
               Clone
             </button>
             <button
               class="btn small"
               onclick={() => confirmReset(name)}
-              disabled={confirmPending}
+              disabled={controlsBlocked}
             >
               Reset
             </button>
@@ -290,7 +307,7 @@
               <button
                 class="btn small danger"
                 onclick={() => confirmDelete(name)}
-                disabled={confirmPending}
+                disabled={controlsBlocked}
               >
                 Delete
               </button>
@@ -322,8 +339,8 @@
         <p class="modal-error" role="alert">{actionMessage}</p>
       {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={closeCreate} disabled={createPending}>Cancel</button>
-        <button class="btn primary" onclick={handleCreate} disabled={!newName.trim() || createPending}>
+        <button class="btn" onclick={closeCreate} disabled={mutationPending}>Cancel</button>
+        <button class="btn primary" onclick={handleCreate} disabled={!newName.trim() || controlsBlocked}>
           Create
         </button>
       </div>
@@ -351,8 +368,8 @@
         <p class="modal-error" role="alert">{actionMessage}</p>
       {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={closeClone} disabled={clonePending}>Cancel</button>
-        <button class="btn primary" onclick={handleClone} disabled={!cloneName.trim() || clonePending}>
+        <button class="btn" onclick={closeClone} disabled={mutationPending}>Cancel</button>
+        <button class="btn primary" onclick={handleClone} disabled={!cloneName.trim() || controlsBlocked}>
           Clone
         </button>
       </div>
@@ -372,8 +389,8 @@
         <p class="modal-error" role="alert">{actionMessage}</p>
       {/if}
       <div class="modal-actions">
-        <button class="btn" onclick={cancelConfirm} disabled={confirmPending}>Cancel</button>
-        <button class="btn danger" onclick={executeConfirm} disabled={confirmPending}>
+        <button class="btn" onclick={cancelConfirm} disabled={mutationPending}>Cancel</button>
+        <button class="btn danger" onclick={executeConfirm} disabled={controlsBlocked}>
           Confirm
         </button>
       </div>

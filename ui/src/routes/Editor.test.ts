@@ -153,6 +153,92 @@ describe("Editor request ordering", () => {
 
     expect(api.getSession).toHaveBeenCalledTimes(1);
   });
+
+  it("invalidates an in-flight detail as soon as profile data changes", async () => {
+    const staleDetail = deferred<SessionDetail>();
+    const failedRefresh = deferred<SessionSummary[]>();
+    api.getSession.mockReturnValueOnce(staleDetail.promise);
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    api.getSessions.mockReset().mockReturnValueOnce(failedRefresh.promise);
+    const refresh = tauri.profileDataChanged!();
+
+    staleDetail.resolve(detail("session-1", "pre-change stale detail"));
+    failedRefresh.reject(new Error("refresh unavailable"));
+    await refresh;
+
+    expect(screen.queryByText("pre-change stale detail")).toBeNull();
+  });
+
+  it("keeps loading owned by the newest overlapping profile refresh", async () => {
+    api.getSession.mockResolvedValueOnce(detail("session-1", "initial detail"));
+    render(Editor);
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    expect(await screen.findByText("initial detail")).toBeTruthy();
+
+    const olderSessions = deferred<SessionSummary[]>();
+    const newerSessions = deferred<SessionSummary[]>();
+    const newestDetail = deferred<SessionDetail>();
+    api.getSessions
+      .mockReset()
+      .mockReturnValueOnce(olderSessions.promise)
+      .mockReturnValueOnce(newerSessions.promise);
+    api.getSession.mockReset().mockReturnValueOnce(newestDetail.promise);
+
+    const olderRefresh = tauri.profileDataChanged!();
+    const newerRefresh = tauri.profileDataChanged!();
+    newerSessions.resolve([summary("session-1", 9)]);
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Loading segments...")).toBeTruthy();
+
+    olderSessions.resolve([summary("session-1", 99)]);
+    await olderRefresh;
+    expect(screen.getByText("Loading segments...")).toBeTruthy();
+
+    newestDetail.resolve(detail("session-1", "newest detail"));
+    await newerRefresh;
+    expect(await screen.findByText("newest detail")).toBeTruthy();
+  });
+
+  it("collapses an expansion removed by the winning session refresh", async () => {
+    api.getSession.mockResolvedValue(detail("session-1", "initial detail"));
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    expect(await screen.findByText("initial detail")).toBeTruthy();
+
+    api.getSessions.mockReset().mockResolvedValue([
+      summary("session-2", 5, "2026-07-17T11:00:00Z"),
+    ]);
+    await tauri.profileDataChanged!();
+
+    expect(screen.queryByText("initial detail")).toBeNull();
+    expect(api.getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears detail loading when the backend returns no session", async () => {
+    const missingDetail = deferred<SessionDetail | null>();
+    api.getSession.mockReturnValueOnce(missingDetail.promise);
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    expect(screen.getByText("Loading segments...")).toBeTruthy();
+
+    missingDetail.resolve(null);
+    await waitFor(() => {
+      expect(screen.queryByText("Loading segments...")).toBeNull();
+      expect(screen.queryByLabelText("Corrected")).toBeNull();
+    });
+  });
 });
 
 describe("Editor mutation failures", () => {
@@ -295,5 +381,130 @@ describe("Editor mutation failures", () => {
     expect(alert.textContent).toContain("Save failed: session A database locked");
     expect(alert.textContent).toContain("session-1");
     expect(screen.getByText("session B text")).toBeTruthy();
+  });
+
+  it("does not let another session's success erase a save failure", async () => {
+    const saveA = deferred<void>();
+    const saveB = deferred<void>();
+    api.getSessions.mockResolvedValue([
+      summary("session-1", 4),
+      summary("session-2", 5, "2026-07-17T11:00:00Z"),
+    ]);
+    api.getSession.mockImplementation((id: string) =>
+      Promise.resolve(detail(id, id === "session-1" ? "session A text" : "session B text"))
+    );
+    api.saveCorrections.mockImplementation((id: string) =>
+      id === "session-1" ? saveA.promise : saveB.promise
+    );
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    await fireEvent.input(await screen.findByLabelText("Corrected"), {
+      target: { value: "session A correction" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save Corrections" }));
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[1]
+    );
+    await fireEvent.input(await screen.findByLabelText("Corrected"), {
+      target: { value: "session B correction" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save Corrections" }));
+    await waitFor(() => expect(api.saveCorrections).toHaveBeenCalledTimes(2));
+
+    saveA.reject(new Error("session A database locked"));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("session-1");
+    saveB.resolve(undefined);
+    expect(await screen.findByText("Corrections saved")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Save failed: session A database locked"
+    );
+  });
+
+  it("refreshes the currently expanded session when a save supersedes an event", async () => {
+    const saveB = deferred<void>();
+    api.getSessions.mockResolvedValue([
+      summary("session-1", 4),
+      summary("session-2", 5, "2026-07-17T11:00:00Z"),
+    ]);
+    api.getSession.mockImplementation((id: string) =>
+      Promise.resolve(detail(id, id === "session-1" ? "session A initial" : "session B initial"))
+    );
+    api.saveCorrections.mockReturnValueOnce(saveB.promise);
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[1]
+    );
+    await fireEvent.input(await screen.findByLabelText("Corrected"), {
+      target: { value: "session B correction" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save Corrections" }));
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    expect(await screen.findByText("session A initial")).toBeTruthy();
+
+    const eventSessions = deferred<SessionSummary[]>();
+    const saveSessions = deferred<SessionSummary[]>();
+    api.getSessions
+      .mockReset()
+      .mockReturnValueOnce(eventSessions.promise)
+      .mockReturnValueOnce(saveSessions.promise);
+    api.getSession.mockReset().mockResolvedValue(
+      detail("session-1", "session A refreshed")
+    );
+    const eventRefresh = tauri.profileDataChanged!();
+    saveB.resolve(undefined);
+    await waitFor(() => expect(api.getSessions).toHaveBeenCalledTimes(2));
+
+    saveSessions.resolve([
+      summary("session-1", 6),
+      summary("session-2", 7, "2026-07-17T11:00:00Z"),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    eventSessions.resolve([summary("session-1", 99)]);
+    await eventRefresh;
+
+    expect(await screen.findByText("session A refreshed")).toBeTruthy();
+    expect(api.getSession).toHaveBeenCalledWith("session-1");
+  });
+
+  it("releases event detail loading when a superseding save refresh fails", async () => {
+    const pendingSave = deferred<void>();
+    api.saveCorrections.mockReturnValueOnce(pendingSave.promise);
+    render(Editor);
+
+    await fireEvent.click(
+      await screen.findByRole("button", { name: /1 segment/ })
+    );
+    await fireEvent.input(await screen.findByLabelText("Corrected"), {
+      target: { value: "the cluster" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save Corrections" }));
+
+    const eventSessions = deferred<SessionSummary[]>();
+    const saveSessions = deferred<SessionSummary[]>();
+    api.getSessions
+      .mockReset()
+      .mockReturnValueOnce(eventSessions.promise)
+      .mockReturnValueOnce(saveSessions.promise);
+    const eventRefresh = tauri.profileDataChanged!();
+    expect(await screen.findByText("Loading sessions...")).toBeTruthy();
+
+    pendingSave.resolve(undefined);
+    await waitFor(() => expect(api.getSessions).toHaveBeenCalledTimes(2));
+    saveSessions.reject(new Error("session refresh unavailable"));
+    expect(await screen.findByText("Corrections saved")).toBeTruthy();
+
+    eventSessions.resolve([summary("session-1", 99)]);
+    await eventRefresh;
+    await waitFor(() =>
+      expect(screen.queryByText("Loading segments...")).toBeNull()
+    );
   });
 });
