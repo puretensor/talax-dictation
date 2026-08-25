@@ -20,6 +20,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(vi.fn()),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 describe("profile selection", () => {
   const config: AppConfig = {
     hotkey: "Ctrl+Shift+Space",
@@ -128,5 +136,101 @@ describe("profile selection", () => {
     await waitFor(() => expect(select.options).toHaveLength(3));
     expect(select.disabled).toBe(false);
     expect(Array.from(select.options, (option) => option.value)).toContain("personal");
+  });
+
+  it("disables the shell selector while a Profiles mutation is pending", async () => {
+    const pendingSwitch = deferred<void>();
+    api.switchProfile.mockReturnValue(pendingSwitch.promise);
+    render(App);
+
+    const select = (await screen.findByLabelText("Profile")) as HTMLSelectElement;
+    await waitFor(() => expect(select.options).toHaveLength(2));
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    expect(select.disabled).toBe(true);
+    pendingSwitch.resolve(undefined);
+    await waitFor(() => expect(select.disabled).toBe(false));
+  });
+
+  it("does not refresh profile state after teardown", async () => {
+    const pendingCreate = deferred<void>();
+    api.createProfile.mockReturnValue(pendingCreate.promise);
+    const { unmount } = render(App);
+
+    await screen.findByLabelText("Profile");
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Create New" }));
+    await fireEvent.input(screen.getByPlaceholderText("Profile name"), {
+      target: { value: "personal" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(api.createProfile).toHaveBeenCalledTimes(1));
+
+    await unmount();
+    pendingCreate.resolve(undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.getProfiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("finishes parent synchronization after navigating away from Profiles", async () => {
+    const pendingSwitch = deferred<void>();
+    api.switchProfile.mockReturnValue(pendingSwitch.promise);
+    render(App);
+
+    const select = (await screen.findByLabelText("Profile")) as HTMLSelectElement;
+    await waitFor(() => expect(select.options).toHaveLength(2));
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Dictate" }));
+
+    expect(select.disabled).toBe(true);
+    pendingSwitch.resolve(undefined);
+    await waitFor(() => expect(select.value).toBe("work"));
+    expect(select.disabled).toBe(false);
+  });
+
+  it("keeps a remounted Profiles view blocked until its earlier mutation settles", async () => {
+    const pendingSwitch = deferred<void>();
+    api.switchProfile.mockReturnValue(pendingSwitch.promise);
+    render(App);
+
+    const select = (await screen.findByLabelText("Profile")) as HTMLSelectElement;
+    await waitFor(() => expect(select.options).toHaveLength(2));
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Dictate" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+
+    for (const button of screen.getAllByRole("button")) {
+      if (["Create New", "Switch", "Clone", "Reset", "Delete"].includes(button.textContent?.trim() ?? "")) {
+        expect(button.hasAttribute("disabled")).toBe(true);
+      }
+    }
+
+    pendingSwitch.resolve(undefined);
+    await waitFor(() => expect(select.value).toBe("work"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Create New" }).hasAttribute("disabled")).toBe(false)
+    );
+  });
+
+  it("blocks Profiles controls while a shell profile switch is pending", async () => {
+    const pendingSwitch = deferred<void>();
+    api.switchProfile.mockReturnValue(pendingSwitch.promise);
+    render(App);
+
+    const select = (await screen.findByLabelText("Profile")) as HTMLSelectElement;
+    await waitFor(() => expect(select.options).toHaveLength(2));
+    await fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await fireEvent.change(select, { target: { value: "work" } });
+
+    for (const button of screen.getAllByRole("button")) {
+      if (["Create New", "Switch", "Clone", "Reset", "Delete"].includes(button.textContent?.trim() ?? "")) {
+        expect(button.hasAttribute("disabled")).toBe(true);
+      }
+    }
+    pendingSwitch.resolve(undefined);
+    await waitFor(() => expect(select.value).toBe("work"));
   });
 });

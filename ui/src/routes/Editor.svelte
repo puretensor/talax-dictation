@@ -6,34 +6,69 @@
   import { LatestRequest } from "../lib/latest-request";
   import type { SessionSummary, SessionDetail } from "../lib/api";
 
+  type SaveFeedback = { message: string; error: boolean };
+  type SessionLoadResult = "loaded" | "failed" | "stale";
+
   let sessions: SessionSummary[] = $state([]);
   let expandedId: string | null = $state(null);
   let expandedDetail: SessionDetail | null = $state(null);
   let editedTexts: Map<string, Map<number, string>> = $state(new Map());
   let savingSessions: Set<string> = $state(new Set());
-  let saveMessage = $state("");
-  let saveMessageSessionId: string | null = $state(null);
-  let saveError = $state(false);
+  let saveFeedbacks: Map<string, SaveFeedback> = $state(new Map());
   let loading = $state(true);
   let loadingDetail = $state(false);
-  let saveMessageTimer: ReturnType<typeof setTimeout> | null = null;
+  const saveMessageTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let destroyed = false;
   const sessionRequests = new LatestRequest();
   const detailRequests = new LatestRequest();
 
-  async function loadSessions(showLoading = true): Promise<boolean> {
+  async function loadSessions(showLoading = true): Promise<SessionLoadResult> {
     const request = sessionRequests.begin();
     if (showLoading) loading = true;
     try {
       const nextSessions = await getSessions();
-      if (!sessionRequests.isCurrent(request)) return false;
+      if (!sessionRequests.isCurrent(request)) return "stale";
       sessions = nextSessions;
-      return true;
+      return "loaded";
     } catch {
-      return false;
+      return sessionRequests.isCurrent(request) ? "failed" : "stale";
     } finally {
       if (sessionRequests.isCurrent(request)) loading = false;
     }
+  }
+
+  async function refreshSessionsAndExpanded(
+    showLoading = true,
+    resetDetail = false
+  ): Promise<SessionLoadResult> {
+    const detailRequest = detailRequests.begin();
+    if (resetDetail) {
+      expandedDetail = null;
+      loadingDetail = expandedId !== null;
+    }
+
+    const result = await loadSessions(showLoading);
+    if (!detailRequests.isCurrent(detailRequest)) return "stale";
+    if (result !== "loaded") {
+      loadingDetail = false;
+      return result;
+    }
+
+    const id = expandedId;
+    if (!id) {
+      loadingDetail = false;
+      return result;
+    }
+    if (!sessions.some((session) => session.id === id)) {
+      expandedId = null;
+      expandedDetail = null;
+      loadingDetail = false;
+      detailRequests.invalidate();
+      return result;
+    }
+
+    await loadExpandedDetail(id, false);
+    return result;
   }
 
   async function loadExpandedDetail(
@@ -46,7 +81,7 @@
       const detail = await getSession(id);
       if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
       expandedDetail = detail;
-      return true;
+      return detail !== null;
     } catch {
       if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
       expandedDetail = null;
@@ -99,11 +134,26 @@
     savingSessions = next;
   }
 
-  function clearSaveMessageTimer(): void {
-    if (saveMessageTimer !== null) {
-      clearTimeout(saveMessageTimer);
-      saveMessageTimer = null;
+  function clearSaveMessageTimer(sessionId: string): void {
+    const timer = saveMessageTimers.get(sessionId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      saveMessageTimers.delete(sessionId);
     }
+  }
+
+  function clearAllSaveMessageTimers(): void {
+    for (const timer of saveMessageTimers.values()) clearTimeout(timer);
+    saveMessageTimers.clear();
+  }
+
+  function clearSaveFeedback(sessionId: string, preserveError: boolean): void {
+    clearSaveMessageTimer(sessionId);
+    const feedback = saveFeedbacks.get(sessionId);
+    if (!feedback || (preserveError && feedback.error)) return;
+    const next = new Map(saveFeedbacks);
+    next.delete(sessionId);
+    saveFeedbacks = next;
   }
 
   function showSaveMessage(
@@ -111,17 +161,20 @@
     error: boolean,
     sessionId: string
   ): void {
-    clearSaveMessageTimer();
+    clearSaveMessageTimer(sessionId);
     if (destroyed) return;
-    saveMessage = message;
-    saveMessageSessionId = sessionId;
-    saveError = error;
+    const next = new Map(saveFeedbacks);
+    next.set(sessionId, { message, error });
+    saveFeedbacks = next;
     if (!error) {
-      saveMessageTimer = setTimeout(() => {
-        saveMessage = "";
-        saveMessageSessionId = null;
-        saveMessageTimer = null;
+      const timer = setTimeout(() => {
+        if (saveMessageTimers.get(sessionId) !== timer) return;
+        const current = new Map(saveFeedbacks);
+        current.delete(sessionId);
+        saveFeedbacks = current;
+        saveMessageTimers.delete(sessionId);
       }, 2000);
+      saveMessageTimers.set(sessionId, timer);
     }
   }
 
@@ -150,11 +203,7 @@
     if (!sessionEdits || sessionEdits.size === 0 || isSaving(sessionId)) return;
 
     setSaving(sessionId, true);
-    clearSaveMessageTimer();
-    if (!saveError) {
-      saveMessage = "";
-      saveMessageSessionId = null;
-    }
+    clearSaveFeedback(sessionId, true);
     const submittedEdits = new Map(sessionEdits);
     const corrections = Array.from(submittedEdits.entries()).map(
       ([segment_index, corrected_text]) => ({ segment_index, corrected_text })
@@ -169,10 +218,7 @@
 
       removeSubmittedEdits(sessionId, submittedEdits);
       if (destroyed) return;
-      const sessionsCurrent = await loadSessions(false);
-      if (sessionsCurrent && expandedId === sessionId) {
-        await loadExpandedDetail(sessionId, false);
-      }
+      await refreshSessionsAndExpanded(false);
       showSaveMessage("Corrections saved", false, sessionId);
     } finally {
       setSaving(sessionId, false);
@@ -202,17 +248,15 @@
   onMount(() => {
     void loadSessions();
     const unlisten = listen("profile-data-changed", async () => {
-      const sessionsCurrent = await loadSessions();
-      if (!sessionsCurrent) return;
-      const id = expandedId;
-      if (id) await loadExpandedDetail(id);
+      if (destroyed) return;
+      await refreshSessionsAndExpanded(true, true);
     });
 
     return () => {
       destroyed = true;
       sessionRequests.invalidate();
       detailRequests.invalidate();
-      clearSaveMessageTimer();
+      clearAllSaveMessageTimers();
       void unlisten.then((fn) => fn());
     };
   });
@@ -221,17 +265,17 @@
 <div class="editor-view">
   <h2>Sessions</h2>
 
-  {#if saveMessage}
+  {#each Array.from(saveFeedbacks.entries()) as [sessionId, feedback] (sessionId)}
     <p
       class="save-message editor-feedback"
-      class:error={saveError}
-      role={saveError ? "alert" : undefined}
+      class:error={feedback.error}
+      role={feedback.error ? "alert" : undefined}
     >
-      {saveMessage}{#if saveError && saveMessageSessionId}
-        <span class="save-session"> (Session: {saveMessageSessionId})</span>
+      {feedback.message}{#if feedback.error}
+        <span class="save-session"> (Session: {sessionId})</span>
       {/if}
     </p>
-  {/if}
+  {/each}
 
   {#if loading}
     <div class="empty-state">Loading sessions...</div>

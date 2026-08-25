@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { getAppConfig, getProfiles, switchProfile } from "./lib/api";
   import { formatError } from "./lib/errors";
   import { LatestRequest } from "./lib/latest-request";
@@ -14,10 +15,13 @@
   let activeProfile = $state("default");
   let profilesLoading = $state(true);
   let profileSwitchPending = $state(false);
+  let profileMutationPending = $state(false);
   let profileError = $state("");
+  let destroyed = false;
   const profileLoads = new LatestRequest();
 
   async function loadProfiles(surfaceError = true): Promise<void> {
+    if (destroyed) return;
     const request = profileLoads.begin();
     profilesLoading = true;
     profileError = "";
@@ -27,7 +31,7 @@
         getProfiles(),
         getAppConfig(),
       ]);
-      if (!profileLoads.isCurrent(request)) return;
+      if (destroyed || !profileLoads.isCurrent(request)) return;
 
       profiles = availableProfiles;
       if (profiles.length > 0) {
@@ -36,13 +40,13 @@
           : profiles[0];
       }
     } catch (error) {
-      if (!profileLoads.isCurrent(request)) return;
+      if (destroyed || !profileLoads.isCurrent(request)) return;
       if (surfaceError) {
         profileError = `Load profiles failed: ${formatError(error)}`;
       }
       throw error;
     } finally {
-      if (profileLoads.isCurrent(request)) {
+      if (!destroyed && profileLoads.isCurrent(request)) {
         profilesLoading = false;
       }
     }
@@ -56,7 +60,9 @@
       !nextProfile ||
       nextProfile === activeProfile ||
       profilesLoading ||
-      profileSwitchPending
+      profileSwitchPending ||
+      profileMutationPending ||
+      destroyed
     ) {
       select.value = activeProfile;
       return;
@@ -76,15 +82,25 @@
   }
 
   function setActiveProfile(nextActiveProfile: string): void {
+    if (destroyed) return;
     activeProfile = nextActiveProfile;
     profileError = "";
   }
 
+  function setProfileMutationPending(pending: boolean): void {
+    if (!destroyed) profileMutationPending = pending;
+  }
+
   async function refreshProfiles(): Promise<void> {
-    await loadProfiles(false);
+    await loadProfiles(currentView !== "profiles");
   }
 
   void loadProfiles().catch(() => undefined);
+
+  onDestroy(() => {
+    destroyed = true;
+    profileLoads.invalidate();
+  });
 </script>
 
 <div class="app">
@@ -120,7 +136,7 @@
         <select
           id="profile-selector"
           value={activeProfile}
-          disabled={profilesLoading || profileSwitchPending}
+          disabled={profilesLoading || profileSwitchPending || profileMutationPending}
           onchange={(e) => {
             const select = e.target as HTMLSelectElement;
             void handleProfileChange(select.value, select);
@@ -151,6 +167,8 @@
             loading={profilesLoading}
             onprofilechange={setActiveProfile}
             onprofileschanged={refreshProfiles}
+            onmutationpending={setProfileMutationPending}
+            blocked={profileSwitchPending || profileMutationPending}
           />
         {:else if currentView === "stats"}
           <Stats />
