@@ -1,8 +1,9 @@
-import { defineConfig } from "vite";
+import { svelteTesting } from "@testing-library/svelte/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), svelteTesting()],
   clearScreen: false,
   server: {
     port: 5173,
@@ -13,5 +14,8 @@ export default defineConfig({
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+  },
+  test: {
+    environment: "jsdom",
   },
 });
