@@ -21,7 +21,7 @@ plist = "1.10"
 anyhow = "1.0.103"
 
 [dependencies]
-talax-engine = { path = "../talax-engine", version = "1.8.2" }
+talax-engine = { path = "../talax-engine", version = "1.8.3" }
 tauri = { version = "2", features = ["tray-icon"] }
 # Runtime-graph floor for RUSTSEC-2026-0190 (tauri -> anyhow).
 anyhow = "1.0.103"
