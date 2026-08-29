@@ -272,8 +272,8 @@ export async function getAppConfig(): Promise<AppConfig> {
     return {
       hotkey: "Ctrl+Shift+Space",
       model: "small.en-q5_1",
-      review_mode: "auto_inject",
-      injection_strategy: "clipboard",
+      review_mode: "review_first",
+      injection_strategy: "clipboard_only",
       active_profile: "default",
       vad_enabled: true,
       pre_roll_ms: 300,
