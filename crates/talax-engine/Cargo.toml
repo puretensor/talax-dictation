@@ -18,6 +18,11 @@ rdev = "0.5"
 arboard = "3"
 enigo = { version = "0.6", features = ["serde"] }
 sha2 = "0.10"
+# Not used directly. Floor on the Enigo/XKB graph: PRs #50/#51 patched
+# Cargo.lock to memmap2 0.9.11 (RUSTSEC-2026-0186); later lock
+# regenerations silently fell back to 0.9.10. A floor survives
+# regeneration; a bare lock entry does not.
+memmap2 = "0.9.11"
 
 [dev-dependencies]
 tempfile = "3"
