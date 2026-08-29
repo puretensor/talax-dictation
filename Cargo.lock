@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "talax-app"
-version = "1.8.2"
+version = "1.8.3"
 dependencies = [
  "anyhow",
  "plist",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "talax-engine"
-version = "1.8.2"
+version = "1.8.3"
 dependencies = [
  "arboard",
  "cpal",
