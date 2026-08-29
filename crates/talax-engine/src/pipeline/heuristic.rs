@@ -2,7 +2,6 @@
 //!
 //! Replaces the LLM layer with fast algorithmic corrections:
 //! - Levenshtein fuzzy matching against known vocabulary
-//! - Soundex phonetic matching for accent substitutions
 //! - Double Metaphone for superior phonetic matching
 //! - Compound word handling (split/join/hyphenate)
 //! - Acronym detection and case restoration
