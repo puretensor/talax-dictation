@@ -1,6 +1,6 @@
 //! SQLite database for corrections, patterns, and sessions.
 
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 use std::path::Path;
 
 const SCHEMA: &str = r#"
@@ -251,10 +251,10 @@ impl Database {
                         ))
                     },
                 )
-                .ok();
+                .optional()?;
 
             let Some((segment_id, original_text, previous_text, was_reviewed)) = segment else {
-                continue;
+                return Err(rusqlite::Error::QueryReturnedNoRows);
             };
 
             // A reviewed segment can be saved again from the editor. Remove
@@ -401,17 +401,24 @@ impl Database {
         session_id: &str,
         corrections: &[(usize, &str)],
     ) -> SqlResult<()> {
-        let mut stmt = self.conn.prepare(
-            "UPDATE segments
-             SET corrected_text = ?1
-             WHERE session_id = ?2 AND segment_index = ?3",
-        )?;
+        let transaction = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = transaction.prepare(
+                "UPDATE segments
+                 SET corrected_text = ?1
+                 WHERE session_id = ?2 AND segment_index = ?3",
+            )?;
 
-        for (segment_index, corrected_text) in corrections {
-            stmt.execute(params![corrected_text, session_id, *segment_index as i64])?;
+            for (segment_index, corrected_text) in corrections {
+                let changed =
+                    stmt.execute(params![corrected_text, session_id, *segment_index as i64])?;
+                if changed != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
         }
 
-        Ok(())
+        transaction.commit()
     }
 
     /// Training texts derived from accepted reviewed output.
@@ -895,5 +902,31 @@ mod tests {
 
         let sessions = db.list_sessions(10).unwrap();
         assert!(!sessions[0].reviewed);
+    }
+
+    #[test]
+    fn correction_writes_reject_missing_segments_without_partial_updates() {
+        let db = Database::open_memory().unwrap();
+        db.create_session("sess1", "", 2.0).unwrap();
+        db.add_segments(
+            "sess1",
+            &[(0.0, 1.0, "first segment"), (1.0, 2.0, "second segment")],
+        )
+        .unwrap();
+
+        assert!(
+            db.save_corrections("sess1", &[(0, "accepted first"), (99, "missing segment")])
+                .is_err()
+        );
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
+        assert_eq!(detail.segments[0].corrected_text, None);
+        assert!(!detail.segments[0].reviewed);
+
+        assert!(
+            db.stage_corrections("sess1", &[(0, "staged first"), (99, "missing segment")])
+                .is_err()
+        );
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
+        assert_eq!(detail.segments[0].corrected_text, None);
     }
 }
