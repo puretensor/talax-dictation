@@ -49,7 +49,7 @@ TalaX is functional but early-stage. Here is what works today and what is still 
 - Voice profiles with independent correction databases
 - Text injection via clipboard paste or keystroke simulation
 - Model download with progress tracking and integrity verification
-- Tauri v2 desktop app with Svelte 5 frontend (7 views)
+- Tauri v2 desktop app with Svelte 5 frontend (6 views)
 
 **Working but cold-start dependent:**
 - L2 N-gram correction -- the interpolated trigram model is fully implemented (training, scoring, save/load, apply), but it only activates after you have reviewed and corrected enough transcriptions to build a meaningful language model. On a fresh profile, L2 is inert.
@@ -205,7 +205,7 @@ tests (including config validation), frontend unit tests (vitest), and doctests.
 | Component | Role |
 |-----------|------|
 | Tauri v2 | Desktop app shell |
-| Svelte 5 | Frontend UI (7 views: Dictate, Editor, Profiles, Patterns, Stats, Settings, Onboarding) |
+| Svelte 5 | Frontend UI (6 views: Dictate, Editor, Profiles, Patterns, Stats, Settings) |
 | whisper-rs (whisper.cpp) | Local speech-to-text |
 | rusqlite | Correction database |
 | rdev | Global hotkey detection |
