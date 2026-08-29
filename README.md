@@ -67,7 +67,7 @@ TalaX is functional but early-stage. Here is what works today and what is still 
 Tauri v2 (Svelte 5 frontend, Rust backend)
   |
   +-- whisper.cpp (whisper-rs) -- local STT, CPU-only
-  |     tiny.en bundled, small.en-q5_1 recommended
+  |     tiny.en downloaded on first use, small.en-q5_1 recommended
   |
   +-- 3-Layer Correction Pipeline
   |     L1: Dictionary    -- regex substitution from learned patterns
@@ -174,7 +174,7 @@ npm --prefix ui run check && npm --prefix ui test
 
 ### Test Coverage
 
-The suite currently includes 138 engine unit tests, 38 engine integration tests, 6 app unit
+The suite currently includes 144 engine unit tests, 38 engine integration tests, 11 app unit
 tests (including config validation), frontend unit tests (vitest), and doctests. Coverage focuses on:
 
 | Area | Covers |
@@ -229,7 +229,7 @@ talax-dictation/
                 whisper/         # Transcriber + model manager
         talax-app/            # Tauri v2 application
             src/
-                commands.rs      # 21 IPC command handlers
+                commands.rs      # 23 IPC command handlers
                 recording.rs     # Recording state machine
                 tray.rs          # System tray
     ui/                          # Svelte 5 frontend

@@ -1,5 +1,4 @@
 //! SQLite database for corrections, patterns, and sessions.
-//! Port of /opt/dictation/server/db.py
 
 use rusqlite::{Connection, Result as SqlResult, params};
 use std::path::Path;

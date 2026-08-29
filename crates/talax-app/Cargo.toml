@@ -10,14 +10,14 @@ tauri-build = { version = "2", features = [] }
 # dependency: tauri -> plist -> quick-xml, where plist < 1.10 vendors
 # quick-xml < 0.41 and re-introduces RUSTSEC-2026-0194 / RUSTSEC-2026-0195.
 # PR #57 fixed those advisories in Cargo.lock alone, with nothing constraining
-# the version; PR #58 regenerated the lock, plist silently fell back to 1.8.0,
+# the version; PR #58 regenerated the lock, plist silently fell back to 1.8.1,
 # and `cargo audit` went red on main the same day. A floor survives a lockfile
 # regeneration, a bare lock entry does not. Remove only once the advisories are
 # withdrawn or tauri's own plist requirement is >= 1.10.
 plist = "1.10"
 
 [dependencies]
-talax-engine = { path = "../talax-engine", version = "1.8.0" }
+talax-engine = { path = "../talax-engine", version = "1.8.1" }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { workspace = true }
 toml = { workspace = true }
