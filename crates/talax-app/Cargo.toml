@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 plist = "1.10"
 
 [dependencies]
-talax-engine = { path = "../talax-engine", version = "1.6.5" }
+talax-engine = { path = "../talax-engine", version = "1.6.6" }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { workspace = true }
 toml = { workspace = true }
