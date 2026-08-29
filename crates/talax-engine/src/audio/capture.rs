@@ -59,6 +59,7 @@ pub fn probe_default_input_device() -> Result<(), CaptureError> {
 
 /// Resamples a buffer of i16 samples from `src_rate` to `dst_rate` using
 /// linear interpolation. Both rates must be > 0.
+#[cfg(test)]
 pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
     if src_rate == dst_rate || samples.is_empty() {
         return samples.to_vec();
@@ -86,6 +87,52 @@ pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> 
     out
 }
 
+/// Linear resampler that retains its fractional source position and boundary
+/// sample between device callbacks.
+struct StreamingLinearResampler {
+    src_rate: u64,
+    dst_rate: u64,
+    source_position: u64,
+    input: Vec<i16>,
+}
+
+impl StreamingLinearResampler {
+    fn new(src_rate: u32, dst_rate: u32) -> Self {
+        debug_assert!(src_rate > 0 && dst_rate > 0);
+        Self {
+            src_rate: u64::from(src_rate),
+            dst_rate: u64::from(dst_rate),
+            source_position: 0,
+            input: Vec::new(),
+        }
+    }
+
+    fn process(&mut self, samples: &[i16]) -> Vec<i16> {
+        self.input.extend_from_slice(samples);
+        let mut output = Vec::new();
+
+        while (self.source_position / self.dst_rate) as usize + 1 < self.input.len() {
+            let index = (self.source_position / self.dst_rate) as usize;
+            let fraction = (self.source_position % self.dst_rate) as f64 / self.dst_rate as f64;
+            let a = self.input[index] as f64;
+            let b = self.input[index + 1] as f64;
+            output.push((a + fraction * (b - a)).round() as i16);
+            self.source_position += self.src_rate;
+        }
+
+        // Samples before the next interpolation position are no longer
+        // needed. For upsampling this deliberately retains the last sample
+        // so the next callback can interpolate across the boundary.
+        let consumed = ((self.source_position / self.dst_rate) as usize).min(self.input.len());
+        if consumed > 0 {
+            self.input.drain(..consumed);
+            self.source_position -= consumed as u64 * self.dst_rate;
+        }
+
+        output
+    }
+}
+
 fn f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
 }
@@ -105,10 +152,27 @@ struct ChunkSpec {
 }
 
 #[cfg(not(test))]
+struct CaptureBuffer {
+    pending: Vec<i16>,
+    resampler: Option<StreamingLinearResampler>,
+}
+
+#[cfg(not(test))]
+impl CaptureBuffer {
+    fn new(spec: ChunkSpec) -> Self {
+        Self {
+            pending: Vec::with_capacity(spec.chunk_samples * 2),
+            resampler: (spec.device_rate != spec.target_rate)
+                .then(|| StreamingLinearResampler::new(spec.device_rate, spec.target_rate)),
+        }
+    }
+}
+
+#[cfg(not(test))]
 fn process_captured_chunk(
     data: &[i16],
     spec: ChunkSpec,
-    pending: &Arc<Mutex<Vec<i16>>>,
+    buffer: &Arc<Mutex<CaptureBuffer>>,
     acc_tx: &Sender<Vec<i16>>,
     chunk_tx: &Sender<Vec<i16>>,
 ) {
@@ -124,21 +188,18 @@ fn process_captured_chunk(
             .collect()
     };
 
-    // Resample if needed.
-    let resampled = if spec.device_rate != spec.target_rate {
-        resample_linear(&mono, spec.device_rate, spec.target_rate)
-    } else {
-        mono
-    };
-
-    let mut pending = match pending.lock() {
+    let mut buffer = match buffer.lock() {
         Ok(guard) => guard,
         Err(_) => return,
     };
-    pending.extend_from_slice(&resampled);
+    let resampled = match buffer.resampler.as_mut() {
+        Some(resampler) => resampler.process(&mono),
+        None => mono,
+    };
+    buffer.pending.extend_from_slice(&resampled);
 
-    while pending.len() >= spec.chunk_samples {
-        let chunk: Vec<i16> = pending.drain(..spec.chunk_samples).collect();
+    while buffer.pending.len() >= spec.chunk_samples {
+        let chunk: Vec<i16> = buffer.pending.drain(..spec.chunk_samples).collect();
         let _ = acc_tx.send(chunk.clone());
         let _ = chunk_tx.send(chunk);
     }
@@ -317,12 +378,12 @@ impl AudioRecorder {
             chunk_samples,
         };
 
-        let pending = Arc::new(Mutex::new(Vec::with_capacity(chunk_samples * 2)));
+        let buffer = Arc::new(Mutex::new(CaptureBuffer::new(spec)));
         let stream_config: cpal::StreamConfig = selected.into();
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => {
-                let pending = Arc::clone(&pending);
+                let buffer = Arc::clone(&buffer);
                 let acc_tx = acc_tx.clone();
                 let chunk_tx = chunk_tx.clone();
                 device
@@ -332,7 +393,7 @@ impl AudioRecorder {
                             if !running.load(Ordering::Relaxed) {
                                 return;
                             }
-                            process_captured_chunk(data, spec, &pending, &acc_tx, &chunk_tx);
+                            process_captured_chunk(data, spec, &buffer, &acc_tx, &chunk_tx);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);
@@ -342,7 +403,7 @@ impl AudioRecorder {
                     .map_err(|e| CaptureError::BuildStream(e.to_string()))?
             }
             cpal::SampleFormat::U16 => {
-                let pending = Arc::clone(&pending);
+                let buffer = Arc::clone(&buffer);
                 let running = self.running.clone();
                 let acc_tx = acc_tx.clone();
                 let chunk_tx = chunk_tx.clone();
@@ -355,7 +416,7 @@ impl AudioRecorder {
                             }
                             let converted: Vec<i16> =
                                 data.iter().copied().map(u16_to_i16).collect();
-                            process_captured_chunk(&converted, spec, &pending, &acc_tx, &chunk_tx);
+                            process_captured_chunk(&converted, spec, &buffer, &acc_tx, &chunk_tx);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);
@@ -365,7 +426,7 @@ impl AudioRecorder {
                     .map_err(|e| CaptureError::BuildStream(e.to_string()))?
             }
             cpal::SampleFormat::F32 => {
-                let pending = Arc::clone(&pending);
+                let buffer = Arc::clone(&buffer);
                 let running = self.running.clone();
                 let acc_tx = acc_tx.clone();
                 let chunk_tx = chunk_tx.clone();
@@ -378,7 +439,7 @@ impl AudioRecorder {
                             }
                             let converted: Vec<i16> =
                                 data.iter().copied().map(f32_to_i16).collect();
-                            process_captured_chunk(&converted, spec, &pending, &acc_tx, &chunk_tx);
+                            process_captured_chunk(&converted, spec, &buffer, &acc_tx, &chunk_tx);
                         },
                         move |err| {
                             tracing::error!("audio capture error: {}", err);
@@ -438,6 +499,30 @@ mod tests {
     fn resample_empty() {
         let output = resample_linear(&[], 44100, 16000);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn chunked_resampling_preserves_the_target_rate() {
+        let input: Vec<i16> = (0..44_100)
+            .map(|index| {
+                let phase = 2.0 * std::f64::consts::PI * 440.0 * index as f64 / 44_100.0;
+                (phase.sin() * 10_000.0).round() as i16
+            })
+            .collect();
+        let expected = resample_linear(&input, 44_100, 16_000);
+        let mut resampler = StreamingLinearResampler::new(44_100, 16_000);
+        let output: Vec<i16> = input
+            .chunks(128)
+            .flat_map(|chunk| resampler.process(chunk))
+            .collect();
+
+        assert_eq!(output.len(), 16_000);
+        assert!(
+            output
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (*actual as i32 - expected as i32).abs() <= 1)
+        );
     }
 
     #[test]
