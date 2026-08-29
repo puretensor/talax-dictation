@@ -1,6 +1,3 @@
-use std::sync::Arc;
-#[cfg(not(test))]
-use std::sync::Mutex;
 /// Audio capture via cpal.
 ///
 /// Provides `AudioRecorder` which opens the default input device, captures
@@ -12,6 +9,7 @@ use std::sync::Mutex;
 /// tests and CI builds succeed without a sound card.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use crate::audio::AudioConfig;
 
@@ -142,7 +140,7 @@ fn u16_to_i16(sample: u16) -> i16 {
 }
 
 /// Conversion parameters for a capture stream: device shape in, target shape out.
-#[cfg(not(test))]
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 struct ChunkSpec {
     device_channels: usize,
@@ -151,13 +149,12 @@ struct ChunkSpec {
     chunk_samples: usize,
 }
 
-#[cfg(not(test))]
+#[cfg_attr(test, allow(dead_code))]
 struct CaptureBuffer {
     pending: Vec<i16>,
     resampler: Option<StreamingLinearResampler>,
 }
 
-#[cfg(not(test))]
 impl CaptureBuffer {
     fn new(spec: ChunkSpec) -> Self {
         Self {
@@ -219,9 +216,13 @@ pub struct AudioRecorder {
     running: Arc<AtomicBool>,
     /// Sender side kept here so we can drop it on stop.
     chunk_tx: Option<Sender<Vec<i16>>>,
+    /// Sender for the accumulator tap, retained so stop can flush a tail.
+    accumulator_tx: Option<Sender<Vec<i16>>>,
     /// Accumulator for all samples delivered so far (fed by a tap in the
     /// callback, not by draining the receiver).
     accumulator_rx: Option<Receiver<Vec<i16>>>,
+    /// Capture state shared with the device callback and stop-time tail flush.
+    capture_buffer: Option<Arc<Mutex<CaptureBuffer>>>,
     /// Handle to the background capture thread (non-test only).
     #[cfg(not(test))]
     _stream: Option<cpal::Stream>,
@@ -233,7 +234,9 @@ impl AudioRecorder {
             config,
             running: Arc::new(AtomicBool::new(false)),
             chunk_tx: None,
+            accumulator_tx: None,
             accumulator_rx: None,
+            capture_buffer: None,
             #[cfg(not(test))]
             _stream: None,
         }
@@ -254,21 +257,31 @@ impl AudioRecorder {
 
         self.running.store(true, Ordering::SeqCst);
         self.chunk_tx = Some(chunk_tx.clone());
+        self.accumulator_tx = Some(acc_tx.clone());
         self.accumulator_rx = Some(acc_rx);
+        let spec = ChunkSpec {
+            device_channels: self.config.channels as usize,
+            device_rate: self.config.sample_rate,
+            target_rate: self.config.sample_rate,
+            chunk_samples: self.config.chunk_samples(),
+        };
+        let buffer = Arc::new(Mutex::new(CaptureBuffer::new(spec)));
+        self.capture_buffer = Some(Arc::clone(&buffer));
 
         #[cfg(not(test))]
         {
-            if let Err(err) = self.start_cpal_stream(chunk_tx, acc_tx) {
+            if let Err(err) = self.start_cpal_stream(chunk_tx, acc_tx, buffer) {
                 self.running.store(false, Ordering::SeqCst);
                 self.chunk_tx = None;
+                self.accumulator_tx = None;
                 self.accumulator_rx = None;
+                self.capture_buffer = None;
                 return Err(err);
             }
         }
 
         #[cfg(test)]
         {
-            // In tests, store senders so inject_test_samples can use them.
             let _ = acc_tx;
             let _ = chunk_tx;
         }
@@ -291,7 +304,26 @@ impl AudioRecorder {
             self._stream = None;
         }
 
-        // Drop the sender so the accumulator channel closes.
+        // A callback only publishes complete chunks. Once the stream has
+        // stopped, publish the final short chunk instead of discarding up to
+        // `chunk_duration_ms` of captured audio.
+        if let Some(buffer) = self.capture_buffer.take() {
+            let tail = {
+                let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut buffer.pending)
+            };
+            if !tail.is_empty() {
+                if let Some(accumulator_tx) = &self.accumulator_tx {
+                    let _ = accumulator_tx.send(tail.clone());
+                }
+                if let Some(chunk_tx) = &self.chunk_tx {
+                    let _ = chunk_tx.send(tail);
+                }
+            }
+        }
+
+        // Drop the senders so the channels close.
+        self.accumulator_tx = None;
         self.chunk_tx = None;
 
         // Drain the accumulator.
@@ -315,6 +347,17 @@ impl AudioRecorder {
         &self.config
     }
 
+    #[cfg(test)]
+    fn inject_pending_test_samples(&self, samples: &[i16]) {
+        self.capture_buffer
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .pending
+            .extend_from_slice(samples);
+    }
+
     // -- cpal-specific implementation, compiled out in tests --
 
     #[cfg(not(test))]
@@ -322,6 +365,7 @@ impl AudioRecorder {
         &mut self,
         chunk_tx: Sender<Vec<i16>>,
         acc_tx: Sender<Vec<i16>>,
+        buffer: Arc<Mutex<CaptureBuffer>>,
     ) -> Result<(), CaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -378,7 +422,7 @@ impl AudioRecorder {
             chunk_samples,
         };
 
-        let buffer = Arc::new(Mutex::new(CaptureBuffer::new(spec)));
+        *buffer.lock().unwrap_or_else(|e| e.into_inner()) = CaptureBuffer::new(spec);
         let stream_config: cpal::StreamConfig = selected.into();
 
         let stream = match sample_format {
@@ -568,5 +612,16 @@ mod tests {
     fn stop_without_start_errors() {
         let mut recorder = AudioRecorder::new(AudioConfig::default());
         assert!(matches!(recorder.stop(), Err(CaptureError::NotRunning)));
+    }
+
+    #[test]
+    fn stop_returns_a_partial_final_chunk() {
+        let mut recorder = AudioRecorder::new(AudioConfig::default());
+        let chunk_rx = recorder.start().unwrap();
+        let tail = vec![7_i16; recorder.config().chunk_samples() - 1];
+        recorder.inject_pending_test_samples(&tail);
+
+        assert_eq!(recorder.stop().unwrap(), tail);
+        assert_eq!(chunk_rx.recv().unwrap(), tail);
     }
 }
