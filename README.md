@@ -49,7 +49,7 @@ TalaX is functional but early-stage. Here is what works today and what is still 
 - Voice profiles with independent correction databases
 - Text injection via clipboard paste or keystroke simulation
 - Model download with progress tracking and integrity verification
-- Tauri v2 desktop app with Svelte 5 frontend (7 views)
+- Tauri v2 desktop app with Svelte 5 frontend (6 views)
 
 **Working but cold-start dependent:**
 - L2 N-gram correction -- the interpolated trigram model is fully implemented (training, scoring, save/load, apply), but it only activates after you have reviewed and corrected enough transcriptions to build a meaningful language model. On a fresh profile, L2 is inert.
@@ -67,7 +67,7 @@ TalaX is functional but early-stage. Here is what works today and what is still 
 Tauri v2 (Svelte 5 frontend, Rust backend)
   |
   +-- whisper.cpp (whisper-rs) -- local STT, CPU-only
-  |     tiny.en bundled, small.en-q5_1 recommended
+  |     models downloaded on first use; small.en-q5_1 recommended
   |
   +-- 3-Layer Correction Pipeline
   |     L1: Dictionary    -- regex substitution from learned patterns
@@ -174,8 +174,8 @@ npm --prefix ui run check && npm --prefix ui test
 
 ### Test Coverage
 
-The suite currently includes 138 engine unit tests, 38 engine integration tests, 6 app unit
-tests (including config validation), frontend unit tests (vitest), and doctests. Coverage focuses on:
+The suite currently includes 140 engine unit tests, 38 engine integration tests, 8 app unit
+tests (including config validation), 35 frontend unit tests (vitest), and doctests. Coverage focuses on:
 
 | Area | Covers |
 |------|--------|
@@ -205,7 +205,7 @@ tests (including config validation), frontend unit tests (vitest), and doctests.
 | Component | Role |
 |-----------|------|
 | Tauri v2 | Desktop app shell |
-| Svelte 5 | Frontend UI (7 views: Dictate, Editor, Profiles, Patterns, Stats, Settings, Onboarding) |
+| Svelte 5 | Frontend UI (6 views: Dictate, Editor, Profiles, Patterns, Stats, Settings) |
 | whisper-rs (whisper.cpp) | Local speech-to-text |
 | rusqlite | Correction database |
 | rdev | Global hotkey detection |
@@ -229,7 +229,7 @@ talax-dictation/
                 whisper/         # Transcriber + model manager
         talax-app/            # Tauri v2 application
             src/
-                commands.rs      # 21 IPC command handlers
+                commands.rs      # 23 IPC command handlers
                 recording.rs     # Recording state machine
                 tray.rs          # System tray
     ui/                          # Svelte 5 frontend
