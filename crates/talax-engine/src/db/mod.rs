@@ -1,6 +1,6 @@
 //! SQLite database for corrections, patterns, and sessions.
 
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 use std::path::Path;
 
 const SCHEMA: &str = r#"
@@ -236,17 +236,38 @@ impl Database {
 
         for (segment_index, corrected_text) in corrections {
             // Get the segment
-            let segment: Option<(i64, String)> = transaction
+            let segment: Option<(i64, String, Option<String>, bool)> = transaction
                 .query_row(
-                    "SELECT id, original_text FROM segments WHERE session_id = ?1 AND segment_index = ?2",
+                    "SELECT id, original_text, corrected_text, reviewed
+                     FROM segments
+                     WHERE session_id = ?1 AND segment_index = ?2",
                     params![session_id, *segment_index as i64],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get::<_, i64>(3)? != 0,
+                        ))
+                    },
                 )
-                .ok();
+                .optional()?;
 
-            let Some((segment_id, original_text)) = segment else {
-                continue;
+            let Some((segment_id, original_text, previous_text, was_reviewed)) = segment else {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
             };
+
+            // A reviewed segment can be saved again from the editor. Remove
+            // the evidence from its previous accepted text before recording
+            // the replacement so one segment contributes at most once.
+            if was_reviewed {
+                Self::remove_segment_learning(
+                    &transaction,
+                    segment_id,
+                    &original_text,
+                    previous_text.as_deref(),
+                )?;
+            }
 
             // Update the segment
             transaction.execute(
@@ -298,23 +319,106 @@ impl Database {
         transaction.commit()
     }
 
+    fn remove_segment_learning(
+        conn: &Connection,
+        segment_id: i64,
+        original_text: &str,
+        corrected_text: Option<&str>,
+    ) -> SqlResult<()> {
+        let contributions: Vec<(String, String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT original, corrected, COUNT(*)
+                 FROM word_corrections
+                 WHERE segment_id = ?1
+                 GROUP BY original, corrected",
+            )?;
+            stmt.query_map(params![segment_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?
+        };
+
+        conn.execute(
+            "DELETE FROM word_corrections WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+
+        for (original, corrected, count) in contributions {
+            let original = original.to_lowercase();
+            conn.execute(
+                "UPDATE correction_patterns
+                 SET frequency = frequency - ?3
+                 WHERE original = ?1 AND corrected = ?2
+                   AND context_before = '' AND context_after = ''
+                   AND frequency > ?3",
+                params![original, corrected, count],
+            )?;
+            conn.execute(
+                "DELETE FROM correction_patterns
+                 WHERE original = ?1 AND corrected = ?2
+                   AND context_before = '' AND context_after = ''
+                   AND frequency <= ?3",
+                params![original, corrected, count],
+            )?;
+        }
+
+        if let Some(corrected_text) = corrected_text {
+            let original: Vec<&str> = original_text.split_whitespace().collect();
+            let corrected: Vec<&str> = corrected_text.split_whitespace().collect();
+            for operation in align_word_sequences(&original, &corrected) {
+                if let WordAlignment::Equal(word) = operation {
+                    Self::decrement_correct_usage(conn, word)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn decrement_correct_usage(conn: &Connection, word: &str) -> SqlResult<()> {
+        let normalized = normalize_learning_word(word);
+        if normalized.is_empty() {
+            return Ok(());
+        }
+
+        conn.execute(
+            "DELETE FROM correct_usages WHERE word = ?1 AND frequency <= 1",
+            params![normalized],
+        )?;
+        conn.execute(
+            "UPDATE correct_usages
+             SET frequency = frequency - 1
+             WHERE word = ?1 AND frequency > 1",
+            params![normalized],
+        )?;
+
+        Ok(())
+    }
+
     /// Stage corrected text for segments without marking them as reviewed.
     pub fn stage_corrections(
         &self,
         session_id: &str,
         corrections: &[(usize, &str)],
     ) -> SqlResult<()> {
-        let mut stmt = self.conn.prepare(
-            "UPDATE segments
-             SET corrected_text = ?1
-             WHERE session_id = ?2 AND segment_index = ?3",
-        )?;
+        let transaction = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = transaction.prepare(
+                "UPDATE segments
+                 SET corrected_text = ?1
+                 WHERE session_id = ?2 AND segment_index = ?3",
+            )?;
 
-        for (segment_index, corrected_text) in corrections {
-            stmt.execute(params![corrected_text, session_id, *segment_index as i64])?;
+            for (segment_index, corrected_text) in corrections {
+                let changed =
+                    stmt.execute(params![corrected_text, session_id, *segment_index as i64])?;
+                if changed != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
         }
 
-        Ok(())
+        transaction.commit()
     }
 
     /// Training texts derived from accepted reviewed output.
@@ -684,6 +788,49 @@ mod tests {
     }
 
     #[test]
+    fn resaving_a_segment_replaces_its_learning_evidence() {
+        let db = Database::open_memory().unwrap();
+        db.create_session("sess1", "", 1.0).unwrap();
+        db.add_segments("sess1", &[(0.0, 1.0, "teh quick")])
+            .unwrap();
+
+        for _ in 0..3 {
+            db.save_corrections("sess1", &[(0, "the quick")]).unwrap();
+        }
+
+        let patterns = db.get_all_patterns().unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].original, "teh");
+        assert_eq!(patterns[0].corrected, "the");
+        assert_eq!(patterns[0].frequency, 1);
+        assert!(db.get_auto_corrections().unwrap().is_empty());
+
+        let word_correction_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM word_corrections", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let quick_frequency: i64 = db
+            .conn
+            .query_row(
+                "SELECT frequency FROM correct_usages WHERE word = 'quick'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(word_correction_count, 1);
+        assert_eq!(quick_frequency, 1);
+
+        db.save_corrections("sess1", &[(0, "ten quick")]).unwrap();
+        let patterns = db.get_all_patterns().unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].original, "teh");
+        assert_eq!(patterns[0].corrected, "ten");
+        assert_eq!(patterns[0].frequency, 1);
+    }
+
+    #[test]
     fn save_corrections_rolls_back_all_changes_on_failure() {
         let db = Database::open_memory().unwrap();
         db.create_session("sess1", "", 1.0).unwrap();
@@ -755,5 +902,31 @@ mod tests {
 
         let sessions = db.list_sessions(10).unwrap();
         assert!(!sessions[0].reviewed);
+    }
+
+    #[test]
+    fn correction_writes_reject_missing_segments_without_partial_updates() {
+        let db = Database::open_memory().unwrap();
+        db.create_session("sess1", "", 2.0).unwrap();
+        db.add_segments(
+            "sess1",
+            &[(0.0, 1.0, "first segment"), (1.0, 2.0, "second segment")],
+        )
+        .unwrap();
+
+        assert!(
+            db.save_corrections("sess1", &[(0, "accepted first"), (99, "missing segment")])
+                .is_err()
+        );
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
+        assert_eq!(detail.segments[0].corrected_text, None);
+        assert!(!detail.segments[0].reviewed);
+
+        assert!(
+            db.stage_corrections("sess1", &[(0, "staged first"), (99, "missing segment")])
+                .is_err()
+        );
+        let detail = db.get_session_detail("sess1").unwrap().unwrap();
+        assert_eq!(detail.segments[0].corrected_text, None);
     }
 }
