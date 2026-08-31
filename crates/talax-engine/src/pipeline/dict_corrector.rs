@@ -2,7 +2,6 @@
 //!
 //! Fastest layer -- applies high-confidence corrections from the learned
 //! pattern database. Sub-millisecond for typical text lengths.
-//! Port of /opt/dictation/server/dict_corrector.py
 
 use regex::Regex;
 use rusqlite::Result as SqlResult;

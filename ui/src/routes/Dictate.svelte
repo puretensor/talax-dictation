@@ -23,7 +23,7 @@
   let modelReady = $state(false);
   let modelLoading = $state(false);
   let hotkey = $state("Ctrl+Shift+Space");
-  let reviewMode = $state("auto_inject");
+  let reviewMode = $state("review_first");
   let editingIndex: number | null = $state(null);
   let editValue = $state("");
   let copied = $state(false);

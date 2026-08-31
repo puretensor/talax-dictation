@@ -1,7 +1,6 @@
 //! Layer 2: N-gram context model corrector.
 //!
 //! Lightweight trigram language model trained on the user's corrected text.
-//! Port of /opt/dictation/server/ngram_corrector.py
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
