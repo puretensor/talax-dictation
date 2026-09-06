@@ -2,6 +2,8 @@
 
 Sweep date: 2026-08-31. Baseline commit: `30f9f42`. Scope: `README.md` (no `docs/` directory). Verification used source reads and read-only local commands (`cargo test --workspace`, `npm test` after `npm ci`).
 
+Re-verified 2026-09-06 against `main` (`febc5bf`): the Onboarding CODE-GAP is gone (PR #73 deleted the unused view), version locations are 1.8.3, engine lib tests are 148, app lib tests are 11, and `lib.rs` still registers 23 IPC handlers.
+
 | Claim | Status | Evidence / change |
 |-------|--------|-------------------|
 | GitHub release badge URL (`puretensor/talax-dictation`) | OK | Repo remote matches; badge target is external. |
@@ -25,7 +27,7 @@ Sweep date: 2026-08-31. Baseline commit: `30f9f42`. Scope: `README.md` (no `docs
 | Model download with progress and integrity verification | OK | `crates/talax-engine/src/whisper/model_manager.rs` — size + SHA-256 checks. |
 | Tauri v2 desktop app | OK | `crates/talax-app/Cargo.toml:21` — `tauri = { version = "2" }`. |
 | Svelte 5 frontend | OK | `ui/package.json:22` — `"svelte": "^5.56.8"`. |
-| Frontend has 7 views including Onboarding | CODE-GAP | `ui/src/routes/Onboarding.svelte` exists but is not imported or routed in `ui/src/App.svelte:6-11,114-131` (6 nav items only). |
+| Frontend has 7 views including Onboarding | FIXED | PR #73 removed `ui/src/routes/Onboarding.svelte`. Live UI is 6 routed views (`ui/src/App.svelte` nav). `ls ui/src/routes/` has no Onboarding file. |
 | L2 n-gram cold-start dependent | OK | `ngram_corrector.rs:209` weights; pipeline reload in `commands.rs:373-374`. |
 | `save_corrections` IPC → learning loop | OK | `commands.rs:735` handler; `ui/src/lib/api.ts:205-209` invokes `save_corrections`. |
 | Planned: cross-profile pattern sharing | OK | No implementation outside README planned list. |
@@ -49,9 +51,9 @@ Sweep date: 2026-08-31. Baseline commit: `30f9f42`. Scope: `README.md` (no `docs
 | `cd crates/talax-app && cargo tauri build` | OK | `tauri.conf.json:10` — `beforeBuildCommand`; `RELEASING.md:60`. |
 | `cargo test --workspace` from repo root | OK | Executed successfully (140 + 38 + 8 + doctests). |
 | `npm --prefix ui run check && npm --prefix ui test` | OK | `ui/package.json` scripts `check` and `test`; 35 vitest tests passed after `npm ci`. |
-| 138 engine unit tests | FIXED | `cargo test -p talax-engine` lib crate: **140** passed. README updated to 140. |
+| 138 engine unit tests | FIXED | `cargo test --workspace` on 2026-09-06: talax-engine lib **148** passed. README on `main` said 144; corrected in a separate README PR. |
 | 38 engine integration tests | OK | `cargo test -p talax-engine --test integration`: **38** passed. |
-| 6 app unit tests | FIXED | `cargo test -p talax-app`: **8** passed (`commands.rs` 4 + `recording.rs` 4). README updated to 8. |
+| 6 app unit tests | FIXED | `cargo test --workspace` on 2026-09-06: talax-app lib **11** passed. |
 | Frontend vitest suites | OK | 35 tests in 5 files (`npm test`). |
 | Doctests present | OK | Workspace doctest run: 1 passed, 1 ignored. |
 | Test coverage area table (modules/paths) | OK | All listed areas map to existing source files under `crates/talax-engine` and `ui/src/lib/api.test.ts`. |
@@ -61,10 +63,10 @@ Sweep date: 2026-08-31. Baseline commit: `30f9f42`. Scope: `README.md` (no `docs
 | Project structure paths | OK | All paths in README tree exist (`Cargo.toml`, `crates/talax-engine/src/{audio,db,hotkey,inject,pipeline,profile,whisper}`, `crates/talax-app/src/{commands,recording,tray}.rs`, `ui/`). |
 | 21 IPC command handlers | FIXED | `lib.rs:63-93` registers **23** handlers. README updated to 23. |
 | License converts to Apache 2.0 on 2030-03-28 | OK | `LICENSE:9-10` — `Change Date: 2030-03-28`, `Change License: Apache License, Version 2.0`. |
-| Workspace version 1.6.1 | OK | `Cargo.toml:6`, `ui/package.json:4`, `tauri.conf.json:4`. |
+| Workspace version 1.6.1 | FIXED | 2026-09-06: `Cargo.toml`, `ui/package.json`, `tauri.conf.json` are **1.8.3**. |
 | `CONTRIBUTING.md` commands (`cargo fmt`, `cargo test -p talax-engine`, `npm ci`) | OK | Valid scripts; not modified (out of primary sweep scope but spot-checked). |
 | `SECURITY.md` exists | OK | File at repo root. |
 
 ## CODE-GAP summary
 
-1. **Onboarding view not wired** — `ui/src/routes/Onboarding.svelte` is implemented but never imported in `ui/src/App.svelte`; the live UI exposes six sidebar routes (Dictate, Sessions, Patterns, Profiles, Stats, Settings).
+None remaining from the 2026-08-31 sweep. The Onboarding view was deleted in PR #73; `ui/src/routes/` contains Dictate, Editor, Patterns, Profiles, Settings, and Stats only.
