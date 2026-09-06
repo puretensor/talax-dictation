@@ -12,7 +12,11 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ureq = "3"
-cpal = "0.18"
+# Floor at 0.18.2 so a lock regeneration cannot silently drop back to
+# 0.18.0/0.18.1. 0.18.2 reports capture xruns as ErrorKind::Xrun and
+# stops treating a nonzero but sub-millisecond ALSA stream timeout as a
+# non-blocking poll.
+cpal = "0.18.2"
 whisper-rs = "0.16"
 rdev = "0.5"
 arboard = "3"
