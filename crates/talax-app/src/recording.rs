@@ -154,7 +154,16 @@ impl ChunkProcessor {
         if !self.speech_started {
             if vad_state == VadState::Speaking {
                 self.speech_started = true;
-                output.extend(self.pre_roll.drain());
+                let preroll = self.pre_roll.drain();
+                // Pre-roll is the only store for this chunk before VAD
+                // confirms speech. When capacity is 0 (or shorter than the
+                // current chunk), drain does not contain the onset, so keep
+                // the speaking chunk itself.
+                if preroll.len() < chunk.len() {
+                    output.extend_from_slice(chunk);
+                } else {
+                    output.extend(preroll);
+                }
             }
             return;
         }
@@ -440,6 +449,31 @@ mod tests {
             processor.process_chunk(&chunk(0, audio.chunk_samples()), &mut out);
         }
 
+        assert_eq!(out.len(), audio.chunk_samples() * 3);
+    }
+
+    #[test]
+    fn chunk_processor_keeps_onset_when_pre_roll_is_zero() {
+        let audio = AudioConfig::default();
+        let mut processor = ChunkProcessor::new(
+            &audio,
+            CaptureSettings {
+                vad_enabled: true,
+                pre_roll_ms: 0,
+                silence_stop_ms: 700,
+            },
+        );
+        let mut out = Vec::new();
+
+        processor.process_chunk(&chunk(0, audio.chunk_samples()), &mut out);
+        processor.process_chunk(&chunk(0, audio.chunk_samples()), &mut out);
+        for _ in 0..5 {
+            processor.process_chunk(&chunk(8_000, audio.chunk_samples()), &mut out);
+        }
+
+        // Default VAD smoothing is 3 frames, so the first two loud frames
+        // are still unconfirmed. The confirming frame and every later
+        // speaking chunk must still be kept when pre-roll is disabled.
         assert_eq!(out.len(), audio.chunk_samples() * 3);
     }
 
