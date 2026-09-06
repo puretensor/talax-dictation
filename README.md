@@ -88,9 +88,9 @@ Tauri v2 (Svelte 5 frontend, Rust backend)
 1. Hold the hotkey (default: `Ctrl+Shift+Space`)
 2. Speak naturally
 3. Release
-4. TalaX transcribes locally, runs corrections, and places the result on your clipboard to review and paste
+4. TalaX transcribes locally, runs corrections, and shows the result in the Dictate view for review
 
-By default TalaX uses **review-first / clipboard-only** delivery: the corrected text is copied to your clipboard and you paste it yourself. Auto-inject (simulated paste) and keystroke type-out are opt-in. They inject into whatever window holds focus at that moment, so if focus moves during transcription the text can land in the wrong application -- only enable them once you trust your workflow.
+By default TalaX uses **review-first / clipboard-only** delivery: the corrected text stays in TalaX until you copy or inject it. Auto-inject (simulated paste) and keystroke type-out are opt-in. They inject into whatever window holds focus at that moment, so if focus moves during transcription the text can land in the wrong application -- only enable them once you trust your workflow. `clipboard_only` means that when auto-inject is enabled, TalaX copies without simulating a paste.
 
 When you review and correct a transcription, the diff is extracted at the word level and stored as correction patterns. Patterns that recur 3+ times with high confidence are promoted to auto-apply. The n-gram model retrains on your reviewed corpus each time the pipeline reloads, improving context-aware corrections over time.
 
@@ -174,7 +174,7 @@ npm --prefix ui run check && npm --prefix ui test
 
 ### Test Coverage
 
-The suite currently includes 144 engine unit tests, 38 engine integration tests, 11 app unit
+The suite currently includes 148 engine unit tests, 38 engine integration tests, 11 app unit
 tests (including config validation), frontend unit tests (vitest), and doctests. Coverage focuses on:
 
 | Area | Covers |
