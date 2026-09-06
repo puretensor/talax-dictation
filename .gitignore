@@ -6,6 +6,7 @@
 ui/node_modules/
 ui/dist/
 ui/.svelte-kit/
+ui/.vitest/
 
 # Generated Tauri schema output
 crates/talax-app/gen/
