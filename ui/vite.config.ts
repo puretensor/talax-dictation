@@ -9,11 +9,13 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  // Tauri 2 hook vars are TAURI_ENV_*. A bare TAURI_ prefix matches
+  // updater signing secrets (GHSA-2rcp-jvr4-r259 / CVE-2023-46115).
+  envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {
     target: "esnext",
-    minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
-    sourcemap: !!process.env.TAURI_DEBUG,
+    minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
   test: {
     environment: "jsdom",
