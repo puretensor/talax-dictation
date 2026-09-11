@@ -175,12 +175,30 @@ pub fn config_path(config_dir: &Path) -> PathBuf {
 
 fn parse_config(contents: &str) -> Option<AppConfig> {
     if let Ok(config) = toml::from_str::<AppConfig>(contents) {
-        return Some(config);
+        return Some(sanitize_loaded_config(config));
     }
     if let Ok(legacy) = toml::from_str::<LegacyAppConfig>(contents) {
-        return Some(migrate_legacy_config(legacy));
+        return Some(sanitize_loaded_config(migrate_legacy_config(legacy)));
     }
     None
+}
+
+/// Keep unknown `injection_strategy` values from silently becoming auto-paste.
+/// `"clipboard"` is the only strategy that simulates a paste; a typo such as
+/// `"clipbord"` previously fell through the `_` arm of
+/// [`injection_mode_from_config`] and enabled that path.
+fn sanitize_loaded_config(mut config: AppConfig) -> AppConfig {
+    if !matches!(
+        config.injection_strategy.as_str(),
+        "clipboard" | "clipboard_only" | "type_out"
+    ) {
+        tracing::warn!(
+            strategy = %config.injection_strategy,
+            "unknown injection_strategy in config; falling back to clipboard_only"
+        );
+        config.injection_strategy = "clipboard_only".to_string();
+    }
+    config
 }
 
 /// Load config from disk, or create a default one if missing.
@@ -257,8 +275,9 @@ fn migrate_legacy_config(legacy: LegacyAppConfig) -> AppConfig {
 fn injection_mode_from_config(config: &AppConfig) -> InjectionMode {
     match config.injection_strategy.as_str() {
         "type_out" => InjectionMode::TypeOut,
+        "clipboard" => InjectionMode::Clipboard,
         "clipboard_only" => InjectionMode::ClipboardOnly,
-        _ => InjectionMode::Clipboard,
+        _ => InjectionMode::ClipboardOnly,
     }
 }
 
@@ -1191,5 +1210,63 @@ mod tests {
         assert!(ensure_model_load_is_current("small", "small", RecordingState::Idle).is_ok());
         assert!(ensure_model_load_is_current("base", "small", RecordingState::Idle).is_err());
         assert!(ensure_model_load_is_current("small", "small", RecordingState::Recording).is_err());
+    }
+
+    #[test]
+    fn unknown_injection_strategy_does_not_enable_auto_paste() {
+        let config = AppConfig {
+            injection_strategy: "clipbord".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            injection_mode_from_config(&config),
+            InjectionMode::ClipboardOnly
+        );
+    }
+
+    #[test]
+    fn clipboard_injection_strategy_still_pastes() {
+        let config = AppConfig {
+            injection_strategy: "clipboard".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            injection_mode_from_config(&config),
+            InjectionMode::Clipboard
+        );
+    }
+
+    #[test]
+    fn load_or_create_config_sanitizes_unknown_injection_strategy() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "talax-app-config-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            r#"
+hotkey = "Ctrl+Shift+Space"
+model = "small.en-q5_1"
+review_mode = "review_first"
+injection_strategy = "clipbord"
+active_profile = "default"
+vad_enabled = true
+pre_roll_ms = 300
+silence_stop_ms = 700
+"#,
+        )
+        .unwrap();
+
+        let config = load_or_create_config(&dir);
+        assert_eq!(config.injection_strategy, "clipboard_only");
+        assert_eq!(
+            injection_mode_from_config(&config),
+            InjectionMode::ClipboardOnly
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
