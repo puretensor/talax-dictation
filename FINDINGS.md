@@ -2,7 +2,7 @@
 
 Sweep date: 2026-08-31. Baseline commit: `30f9f42`. Scope: `README.md` (no `docs/` directory). Verification used source reads and read-only local commands (`cargo test --workspace`, `npm test` after `npm ci`).
 
-Re-verified 2026-09-06 against `main` (`febc5bf`): the Onboarding CODE-GAP is gone (PR #73 deleted the unused view), version locations are 1.8.3, engine lib tests are 148, app lib tests are 11, and `lib.rs` still registers 23 IPC handlers.
+Re-verified 2026-09-11 against `main` (`92037cb`): the Onboarding CODE-GAP is gone (PR #73 deleted the unused view), version locations are 1.11.0, engine lib tests are 148, app lib tests are 12, `lib.rs` still registers 23 IPC handlers, and vitest reports 35 tests in 5 files.
 
 | Claim | Status | Evidence / change |
 |-------|--------|-------------------|
@@ -26,7 +26,7 @@ Re-verified 2026-09-06 against `main` (`febc5bf`): the Onboarding CODE-GAP is go
 | Default review-first / clipboard-only delivery | OK | `commands.rs:42-47` — `review_mode: "review_first"`, `injection_strategy: "clipboard_only"`; `InjectionMode` default `ClipboardOnly` in `inject/mod.rs:55-56`. |
 | Model download with progress and integrity verification | OK | `crates/talax-engine/src/whisper/model_manager.rs` — size + SHA-256 checks. |
 | Tauri v2 desktop app | OK | `crates/talax-app/Cargo.toml:21` — `tauri = { version = "2" }`. |
-| Svelte 5 frontend | OK | `ui/package.json:22` — `"svelte": "^5.56.8"`. |
+| Svelte 5 frontend | OK | `ui/package.json` — `"svelte": "^5.56.10"`. |
 | Frontend has 7 views including Onboarding | FIXED | PR #73 removed `ui/src/routes/Onboarding.svelte`. Live UI is 6 routed views (`ui/src/App.svelte` nav). `ls ui/src/routes/` has no Onboarding file. |
 | L2 n-gram cold-start dependent | OK | `ngram_corrector.rs:209` weights; pipeline reload in `commands.rs:373-374`. |
 | `save_corrections` IPC → learning loop | OK | `commands.rs:735` handler; `ui/src/lib/api.ts:205-209` invokes `save_corrections`. |
@@ -49,11 +49,11 @@ Re-verified 2026-09-06 against `main` (`febc5bf`): the Onboarding CODE-GAP is go
 | `npm --prefix ui install` | OK | `ui/package.json` exists; script name valid. |
 | `cd crates/talax-app && cargo tauri dev` | OK | `tauri.conf.json:9` — `beforeDevCommand` runs UI dev server. |
 | `cd crates/talax-app && cargo tauri build` | OK | `tauri.conf.json:10` — `beforeBuildCommand`; `RELEASING.md:60`. |
-| `cargo test --workspace` from repo root | OK | Executed successfully (140 + 38 + 8 + doctests). |
+| `cargo test --workspace` from repo root | OK | Executed 2026-09-11: engine lib 148, engine integration 38, app lib 12, doctests 1 passed / 1 ignored. |
 | `npm --prefix ui run check && npm --prefix ui test` | OK | `ui/package.json` scripts `check` and `test`; 35 vitest tests passed after `npm ci`. |
 | 138 engine unit tests | FIXED | `cargo test --workspace` on 2026-09-06: talax-engine lib **148** passed. README on `main` said 144; corrected in a separate README PR. |
 | 38 engine integration tests | OK | `cargo test -p talax-engine --test integration`: **38** passed. |
-| 6 app unit tests | FIXED | `cargo test --workspace` on 2026-09-06: talax-app lib **11** passed. |
+| 6 app unit tests | FIXED | `cargo test --workspace` on 2026-09-11: talax-app lib **12** passed (README on `main` still said 11). |
 | Frontend vitest suites | OK | 35 tests in 5 files (`npm test`). |
 | Doctests present | OK | Workspace doctest run: 1 passed, 1 ignored. |
 | Test coverage area table (modules/paths) | OK | All listed areas map to existing source files under `crates/talax-engine` and `ui/src/lib/api.test.ts`. |
@@ -63,7 +63,7 @@ Re-verified 2026-09-06 against `main` (`febc5bf`): the Onboarding CODE-GAP is go
 | Project structure paths | OK | All paths in README tree exist (`Cargo.toml`, `crates/talax-engine/src/{audio,db,hotkey,inject,pipeline,profile,whisper}`, `crates/talax-app/src/{commands,recording,tray}.rs`, `ui/`). |
 | 21 IPC command handlers | FIXED | `lib.rs:63-93` registers **23** handlers. README updated to 23. |
 | License converts to Apache 2.0 on 2030-03-28 | OK | `LICENSE:9-10` — `Change Date: 2030-03-28`, `Change License: Apache License, Version 2.0`. |
-| Workspace version 1.6.1 | FIXED | 2026-09-06: `Cargo.toml`, `ui/package.json`, `tauri.conf.json` are **1.8.3**. |
+| Workspace version 1.6.1 | FIXED | 2026-09-11: `Cargo.toml`, `ui/package.json`, `tauri.conf.json` are **1.11.0**. |
 | `CONTRIBUTING.md` commands (`cargo fmt`, `cargo test -p talax-engine`, `npm ci`) | OK | Valid scripts; not modified (out of primary sweep scope but spot-checked). |
 | `SECURITY.md` exists | OK | File at repo root. |
 

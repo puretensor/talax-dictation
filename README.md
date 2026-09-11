@@ -174,7 +174,7 @@ npm --prefix ui run check && npm --prefix ui test
 
 ### Test Coverage
 
-The suite currently includes 148 engine unit tests, 38 engine integration tests, 11 app unit
+The suite currently includes 148 engine unit tests, 38 engine integration tests, 12 app unit
 tests (including config validation), frontend unit tests (vitest), and doctests. Coverage focuses on:
 
 | Area | Covers |
