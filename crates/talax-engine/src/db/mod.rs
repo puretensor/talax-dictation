@@ -345,19 +345,22 @@ impl Database {
 
         for (original, corrected, count) in contributions {
             let original = original.to_lowercase();
+            // Test exhaustion against the original frequency. Decrementing
+            // first can make a surviving row look exhausted and erase other
+            // segments' contributions.
+            conn.execute(
+                "DELETE FROM correction_patterns
+                 WHERE original = ?1 AND corrected = ?2
+                   AND context_before = '' AND context_after = ''
+                   AND frequency <= ?3",
+                params![original, corrected, count],
+            )?;
             conn.execute(
                 "UPDATE correction_patterns
                  SET frequency = frequency - ?3
                  WHERE original = ?1 AND corrected = ?2
                    AND context_before = '' AND context_after = ''
                    AND frequency > ?3",
-                params![original, corrected, count],
-            )?;
-            conn.execute(
-                "DELETE FROM correction_patterns
-                 WHERE original = ?1 AND corrected = ?2
-                   AND context_before = '' AND context_after = ''
-                   AND frequency <= ?3",
                 params![original, corrected, count],
             )?;
         }
@@ -785,6 +788,42 @@ mod tests {
 
         assert_eq!(quick_freq, 1);
         assert_eq!(fox_freq, 1);
+    }
+
+    #[test]
+    fn resaving_a_segment_preserves_other_segments_learning() {
+        for occurrences in [1, 2] {
+            let db = Database::open_memory().unwrap();
+            let original = vec!["teh"; occurrences].join(" ");
+            let corrected = vec!["the"; occurrences].join(" ");
+            for session in ["first", "second"] {
+                db.create_session(session, "", 1.0).unwrap();
+                db.add_segments(session, &[(0.0, 1.0, original.as_str())])
+                    .unwrap();
+                db.save_corrections(session, &[(0, corrected.as_str())])
+                    .unwrap();
+            }
+
+            for _ in 0..3 {
+                db.save_corrections("first", &[(0, corrected.as_str())])
+                    .unwrap();
+                let patterns = db.get_all_patterns().unwrap();
+                assert_eq!(patterns.len(), 1);
+                assert_eq!(patterns[0].frequency, (occurrences * 2) as i64);
+            }
+
+            // Retracting the first segment must leave the second's evidence.
+            db.save_corrections("first", &[(0, original.as_str())])
+                .unwrap();
+            let patterns = db.get_all_patterns().unwrap();
+            assert_eq!(patterns.len(), 1);
+            assert_eq!(patterns[0].frequency, occurrences as i64);
+
+            // Retracting the final contributor must still delete the pattern.
+            db.save_corrections("second", &[(0, original.as_str())])
+                .unwrap();
+            assert!(db.get_all_patterns().unwrap().is_empty());
+        }
     }
 
     #[test]
