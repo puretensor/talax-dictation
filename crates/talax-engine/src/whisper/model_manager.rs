@@ -41,7 +41,11 @@ pub enum ModelError {
 // Model catalogue
 // ---------------------------------------------------------------------------
 
-const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+// Sizes and SHA-256 values below match the LFS pointers at this immutable
+// upstream revision. Keep the download revision and catalogue in sync.
+// Source: https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1
+const HF_BASE: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
 
 struct ModelSpec {
     name: &'static str,
@@ -56,42 +60,42 @@ const MODELS: &[ModelSpec] = &[
         name: "tiny.en",
         filename: "ggml-tiny.en.bin",
         size_bytes: 77_704_715,
-        sha256: "0d686a2a6a22b02da2ef3101d4c86e68461363a623c58f27f81b1b2d36b42317",
+        sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         description: "Tiny English-only (~75 MB) - fastest, lowest accuracy",
     },
     ModelSpec {
         name: "base.en",
         filename: "ggml-base.en.bin",
         size_bytes: 147_964_211,
-        sha256: "ff7d10f8526045d48149699b43aeaa014e4b337239bc5a35251116fc179aabcf",
+        sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
         description: "Base English-only (~142 MB) - fast, moderate accuracy",
     },
     ModelSpec {
         name: "small.en",
         filename: "ggml-small.en.bin",
         size_bytes: 487_614_201,
-        sha256: "0d57184d34ae7d736e5bb2db5bf83debe730bd53dcefa235a0979b9dcfd33fb3",
+        sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
         description: "Small English-only (~466 MB) - balanced speed/accuracy",
     },
     ModelSpec {
         name: "small.en-q5_1",
         filename: "ggml-small.en-q5_1.bin",
         size_bytes: 190_098_681,
-        sha256: "ba5733534a74f94f8f53afadda9dcb21d029f015065399bb22e72d8cc4bc9ced",
+        sha256: "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30",
         description: "Small English-only Q5_1 quantised (~181 MB) - recommended default",
     },
     ModelSpec {
         name: "medium.en-q5_0",
         filename: "ggml-medium.en-q5_0.bin",
         size_bytes: 539_225_533,
-        sha256: "5ce4bb290d6d5b998951eea06404a8a5c89c6ff1eec7f52bb326c4b2de45a3b3",
+        sha256: "76733e26ad8fe1c7a5bf7531a9d41917b2adc0f20f2e4f5531688a8c6cd88eb0",
         description: "Medium English-only Q5_0 quantised (~515 MB) - high accuracy",
     },
     ModelSpec {
         name: "large-v3-turbo-q5_0",
         filename: "ggml-large-v3-turbo-q5_0.bin",
         size_bytes: 574_041_195,
-        sha256: "9c7b9c6bf60cf555f34fe7d81e8643764ff03d2f60b6fa550f5630be52eef830",
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         description: "Large-v3 Turbo Q5_0 quantised (~574 MB) - highest accuracy, multilingual",
     },
 ];
