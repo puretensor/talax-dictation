@@ -190,7 +190,18 @@ impl HeuristicExpander {
                 continue;
             }
 
-            // 2d. Context-aware scored matching against proper nouns
+            // 2d. Exact vocabulary wins over fuzzy alternatives, including
+            // words whose casing is already correct.
+            if let Some(correct) = self.proper_nouns.get(&word_lower) {
+                if words[i] != *correct {
+                    changes.push(self.make_change(i, &words[i], correct));
+                    words[i] = correct.clone();
+                }
+                i += 1;
+                continue;
+            }
+
+            // 2e. Context-aware scored matching against proper nouns
             if word_lower.len() >= 3
                 && let Some(best) = self.best_scored_candidate(&word_lower)
                 && best.text != words[i]
@@ -199,14 +210,6 @@ impl HeuristicExpander {
                 words[i] = best.text;
                 i += 1;
                 continue;
-            }
-
-            // 2e. Case restoration for exact matches
-            if let Some(correct) = self.proper_nouns.get(&word_lower)
-                && words[i] != *correct
-            {
-                changes.push(self.make_change(i, &words[i], correct));
-                words[i] = correct.clone();
             }
 
             i += 1;
@@ -1359,6 +1362,27 @@ mod tests {
     }
 
     // === Case restoration ===
+
+    #[test]
+    fn exact_vocabulary_wins_over_nearby_fuzzy_candidates() {
+        let mut exp = HeuristicExpander::new();
+        for name in ["Bob", "Rob", "GPU", "CPU"] {
+            exp.proper_nouns
+                .insert(name.to_lowercase(), name.to_string());
+        }
+        exp.derive_acronyms();
+
+        let (result, changes) = exp.apply("Bob Rob GPU CPU");
+        assert_eq!(result, "Bob Rob GPU CPU");
+        assert!(changes.is_empty());
+
+        let (result, changes) = exp.apply("bob rob gpu cpu");
+        assert_eq!(result, "Bob Rob GPU CPU");
+        assert_eq!(changes.len(), 4);
+
+        // Unknown words can still use fuzzy matching.
+        assert_eq!(exp.apply("Boby").0, "Bob");
+    }
 
     #[test]
     fn test_case_restoration() {
