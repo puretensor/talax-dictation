@@ -10,11 +10,9 @@ fn automatic_language_detection_still_transcribes_speech() {
     let model = PathBuf::from(std::env::var_os("TALAX_TEST_MODEL").expect("set TALAX_TEST_MODEL"));
     let pcm = PathBuf::from(std::env::var_os("TALAX_TEST_PCM").expect("set TALAX_TEST_PCM"));
     let bytes = std::fs::read(pcm).unwrap();
-    assert_eq!(bytes.len() % 2, 0);
-    let samples: Vec<i16> = bytes
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-        .collect();
+    let (frames, remainder) = bytes.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let samples: Vec<i16> = frames.iter().copied().map(i16::from_le_bytes).collect();
     let transcriber = Transcriber::new(&model).unwrap();
     // Control: the fixture must actually contain recognizable speech.
     let explicit = transcriber
