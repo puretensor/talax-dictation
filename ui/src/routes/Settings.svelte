@@ -49,10 +49,17 @@
     loading = false;
   }
 
+  async function refreshModels() {
+    [models, diagnostics] = await Promise.all([
+      getAvailableModels(),
+      getRuntimeDiagnostics(),
+    ]);
+  }
+
   onMount(() => {
     loadData();
     const unlisten = listen("model-downloaded", () => {
-      loadData();
+      refreshModels();
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -77,10 +84,7 @@
     downloading = modelId;
     try {
       await downloadModel(modelId);
-      [models, diagnostics] = await Promise.all([
-        getAvailableModels(),
-        getRuntimeDiagnostics(),
-      ]);
+      await refreshModels();
     } catch (e) {
       saveMessage = `Download failed: ${e}`;
     } finally {
