@@ -7,6 +7,7 @@
     isModelReady,
     loadWhisperModel,
     getAppConfig,
+    getRecordingStatus,
     saveCorrections,
     injectReviewText,
     type RecordingState,
@@ -14,6 +15,7 @@
     type TranscriptionEvent,
     type PipelineChange,
   } from "../lib/api";
+  import { LatestRequest } from "../lib/latest-request";
 
   let status = $state<RecordingState>("idle");
   let statusMessage = $state("");
@@ -32,6 +34,18 @@
   let saveMessage = $state("");
   let reviewDirty = $state(false);
   let injectingReview = $state(false);
+  let statusLoading = $state(true);
+  const statusRequests = new LatestRequest();
+  const reviewSaves = new LatestRequest();
+
+  async function refreshRecordingStatus(commandFailed = false) {
+    const request = statusRequests.begin();
+    const current = await getRecordingStatus();
+    if (statusRequests.isCurrent(request)) {
+      status = current === "idle" && commandFailed ? "error" : current;
+      statusLoading = false;
+    }
+  }
 
   let words = $derived(correctedText ? correctedText.split(" ") : []);
 
@@ -88,14 +102,14 @@
         await startRecording();
       } catch (e) {
         statusMessage = `${e}`;
-        status = "error";
+        await refreshRecordingStatus(true);
       }
     } else if (status === "recording") {
       try {
         await stopRecording();
       } catch (e) {
         statusMessage = `${e}`;
-        status = "error";
+        await refreshRecordingStatus(true);
       }
     }
   }
@@ -111,6 +125,7 @@
       updated[editingIndex] = editValue;
       correctedText = updated.join(" ");
       reviewDirty = true;
+      saveMessage = "";
       editingIndex = null;
       editValue = "";
     }
@@ -136,18 +151,24 @@
 
   async function saveCurrentReview() {
     if (!sessionId || !correctedText.trim()) return;
+    const request = reviewSaves.begin();
+    const submittedText = correctedText;
     saving = true;
     try {
       await saveCorrections(sessionId, [
-        { segment_index: 0, corrected_text: correctedText },
+        { segment_index: 0, corrected_text: submittedText },
       ]);
-      reviewDirty = false;
-      saveMessage = "Saved to profile";
-      setTimeout(() => (saveMessage = ""), 2000);
+      if (reviewSaves.isCurrent(request) && correctedText === submittedText) {
+        reviewDirty = false;
+        saveMessage = "Saved to profile";
+        setTimeout(() => {
+          if (reviewSaves.isCurrent(request)) saveMessage = "";
+        }, 2000);
+      }
     } catch (e) {
-      saveMessage = `Save failed: ${e}`;
+      if (reviewSaves.isCurrent(request)) saveMessage = `Save failed: ${e}`;
     } finally {
-      saving = false;
+      if (reviewSaves.isCurrent(request)) saving = false;
     }
   }
 
@@ -166,6 +187,7 @@
   }
 
   onMount(() => {
+    let mounted = true;
     getAppConfig().then((cfg) => {
       hotkey = cfg.hotkey;
       reviewMode = cfg.review_mode;
@@ -174,14 +196,23 @@
 
     // Listen for recording state events from backend
     const unlistenState = listen<RecordingEvent>("recording-state", (event) => {
+      statusRequests.invalidate();
       status = event.payload.state;
+      statusLoading = false;
       statusMessage = event.payload.message || "";
+    });
+    // Subscribe before reading the snapshot so no transition is missed.
+    unlistenState.then(() => {
+      if (mounted) void refreshRecordingStatus();
     });
 
     // Listen for transcription results
     const unlistenTranscription = listen<TranscriptionEvent>(
       "transcription-complete",
       (event) => {
+        cancelWordEdit();
+        reviewSaves.invalidate();
+        saving = false;
         sessionId = event.payload.session_id;
         transcription = event.payload.raw.full_text;
         correctedText = event.payload.corrected.corrected;
@@ -198,6 +229,9 @@
     });
 
     return () => {
+      mounted = false;
+      statusRequests.invalidate();
+      reviewSaves.invalidate();
       unlistenState.then((fn) => fn());
       unlistenTranscription.then((fn) => fn());
       unlistenModel.then((fn) => fn());
@@ -212,7 +246,7 @@
     <button
       class="status-ring {statusClass}"
       onclick={toggleRecording}
-      disabled={modelLoading ||
+      disabled={statusLoading || modelLoading ||
         status === "processing" ||
         status === "injecting"}
     >
