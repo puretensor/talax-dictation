@@ -43,16 +43,48 @@ pub fn probe_default_input_device() -> Result<(), CaptureError> {
 
         let host = cpal::default_host();
         let device = host.default_input_device().ok_or(CaptureError::NoDevice)?;
-        let mut configs = device
+        let configs = device
             .supported_input_configs()
             .map_err(|_| CaptureError::NoSuitableConfig)?;
 
-        if configs.next().is_some() {
-            Ok(())
+        let config = AudioConfig::default();
+        select_input_config(configs, config.channels, config.sample_rate).map(|_| ())
+    }
+}
+
+fn select_input_config(
+    supported_configs: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
+    target_channels: u16,
+    target_rate: u32,
+) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+    let mut best_config = None;
+    let mut best_distance = i64::MAX;
+    for cfg in supported_configs {
+        // Only rank formats for which start_cpal_stream has a converter.
+        // ALSA can enumerate I8/U8 ahead of equally suitable I16 configs.
+        if !matches!(
+            cfg.sample_format(),
+            cpal::SampleFormat::I16 | cpal::SampleFormat::U16 | cpal::SampleFormat::F32
+        ) {
+            continue;
+        }
+        let channels_ok = cfg.channels() == target_channels;
+        let min = cfg.min_sample_rate() as i64;
+        let max = cfg.max_sample_rate() as i64;
+        let target = target_rate as i64;
+        let rate_distance = if target >= min && target <= max {
+            0
         } else {
-            Err(CaptureError::NoSuitableConfig)
+            std::cmp::min((target - min).abs(), (target - max).abs())
+        };
+        let distance = rate_distance + if channels_ok { 0 } else { 100_000 };
+        if distance < best_distance {
+            best_distance = distance;
+            let clamped_rate = target_rate.clamp(cfg.min_sample_rate(), cfg.max_sample_rate());
+            best_config = Some(cfg.with_sample_rate(clamped_rate));
         }
     }
+    best_config.ok_or(CaptureError::NoSuitableConfig)
 }
 
 /// Resamples a buffer of i16 samples from `src_rate` to `dst_rate` using
@@ -376,37 +408,11 @@ impl AudioRecorder {
             .supported_input_configs()
             .map_err(|_| CaptureError::NoSuitableConfig)?;
 
-        // Try to find a config that supports our target sample rate, or pick
-        // the closest one for resampling.
-        let target_channels = self.config.channels;
-
-        let mut best_config = None;
-        let mut best_distance: i64 = i64::MAX;
-
-        for cfg in supported_configs {
-            // Prefer matching channel count.
-            let channels_ok = cfg.channels() == target_channels;
-            let min = cfg.min_sample_rate() as i64;
-            let max = cfg.max_sample_rate() as i64;
-            let target = self.config.sample_rate as i64;
-
-            let rate_distance = if target >= min && target <= max {
-                0i64
-            } else {
-                std::cmp::min((target - min).abs(), (target - max).abs())
-            };
-
-            let distance = rate_distance + if channels_ok { 0 } else { 100_000 };
-            if distance < best_distance {
-                best_distance = distance;
-                // Clamp to the supported range.
-                let clamped_rate =
-                    (target as u32).clamp(cfg.min_sample_rate(), cfg.max_sample_rate());
-                best_config = Some(cfg.with_sample_rate(clamped_rate));
-            }
-        }
-
-        let selected = best_config.ok_or(CaptureError::NoSuitableConfig)?;
+        let selected = select_input_config(
+            supported_configs,
+            self.config.channels,
+            self.config.sample_rate,
+        )?;
         let device_rate = selected.sample_rate();
         let device_channels = selected.channels() as usize;
         let sample_format = selected.sample_format();
@@ -511,6 +517,78 @@ impl AudioRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input_range(
+        format: cpal::SampleFormat,
+        channels: u16,
+        min: u32,
+        max: u32,
+    ) -> cpal::SupportedStreamConfigRange {
+        cpal::SupportedStreamConfigRange::new(
+            channels,
+            min,
+            max,
+            cpal::SupportedBufferSize::Unknown,
+            format,
+        )
+    }
+
+    #[test]
+    fn input_selection_skips_unsupported_formats_before_ranking() {
+        use cpal::SampleFormat::{F32, I8, I16};
+        let selected = select_input_config(
+            [
+                input_range(I8, 1, 16_000, 16_000),
+                input_range(I16, 1, 16_000, 16_000),
+            ],
+            1,
+            16_000,
+        )
+        .unwrap();
+        assert_eq!(selected.sample_format(), I16);
+        let selected = select_input_config(
+            [
+                input_range(I8, 1, 16_000, 16_000),
+                input_range(F32, 2, 44_100, 48_000),
+            ],
+            1,
+            16_000,
+        )
+        .unwrap();
+        assert_eq!(selected.sample_format(), F32);
+        assert_eq!(selected.channels(), 2);
+        assert_eq!(selected.sample_rate(), 44_100);
+    }
+
+    #[test]
+    fn input_selection_rejects_unsupported_only_or_empty_devices() {
+        assert!(matches!(
+            select_input_config(
+                [input_range(cpal::SampleFormat::I8, 1, 16_000, 48_000),],
+                1,
+                16_000
+            ),
+            Err(CaptureError::NoSuitableConfig)
+        ));
+        assert!(select_input_config([], 1, 16_000).is_err());
+    }
+
+    #[test]
+    fn input_selection_preserves_channel_preference_and_rate_clamping() {
+        use cpal::SampleFormat::{F32, I16, U16};
+        let selected = select_input_config(
+            [
+                input_range(I16, 2, 16_000, 16_000),
+                input_range(U16, 1, 44_100, 48_000),
+                input_range(F32, 1, 8_000, 12_000),
+            ],
+            1,
+            16_000,
+        )
+        .unwrap();
+        assert_eq!(selected.sample_format(), F32);
+        assert_eq!(selected.sample_rate(), 12_000);
+    }
 
     #[test]
     fn resample_identity() {
