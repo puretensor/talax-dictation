@@ -24,7 +24,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libx11-dev \
             libxtst-dev \
-            pkg-config
+            pkg-config \
+            xvfb \
+            xclip
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -46,6 +48,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Workspace tests
         run: cargo test --workspace
+      - name: Clipboard ownership on isolated X11
+        run: env -u WAYLAND_DISPLAY xvfb-run -a cargo test -p talax-engine --test clipboard_x11 -- --ignored
       - name: Frontend dependencies
         working-directory: ui
         run: npm ci

@@ -91,6 +91,11 @@ pub fn run() {
             commands::get_runtime_diagnostics,
             commands::save_app_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                talax_engine::inject::release_clipboard();
+            }
+        });
 }

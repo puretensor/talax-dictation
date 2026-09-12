@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +14,29 @@ const CLIPBOARD_SETTLE: Duration = Duration::from_millis(120);
 /// after `set_text`, and the per-iteration poll interval.
 const CLIPBOARD_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+// Linux serves the selection from the process that owns it. Keep that owner
+// alive across the app's temporary injectors, including manual-paste recovery.
+static CLIPBOARD: Mutex<Option<Clipboard>> = Mutex::new(None);
+
+fn with_clipboard<T>(
+    operation: impl FnOnce(&mut Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, InjectionError> {
+    let mut owner = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    if owner.is_none() {
+        // Failed initialization remains retryable on the next request.
+        *owner =
+            Some(Clipboard::new().map_err(|e| InjectionError::ClipboardAccess(e.to_string()))?);
+    }
+    operation(owner.as_mut().expect("clipboard initialized"))
+        .map_err(|e| InjectionError::ClipboardAccess(e.to_string()))
+}
+
+/// Release the retained clipboard owner before the application's event loop exits.
+/// Clipboard contents may disappear on Linux without a clipboard manager.
+pub fn release_clipboard() {
+    CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
 
 // ---------------------------------------------------------------------------
 // Error
@@ -122,19 +146,12 @@ impl TextInjector {
 
     /// Copy `text` to the system clipboard.
     pub fn set_clipboard(&self, text: &str) -> Result<(), InjectionError> {
-        let mut cb =
-            Clipboard::new().map_err(|e| InjectionError::ClipboardAccess(e.to_string()))?;
-        cb.set_text(text)
-            .map_err(|e| InjectionError::ClipboardAccess(e.to_string()))?;
-        Ok(())
+        with_clipboard(|cb| cb.set_text(text))
     }
 
     /// Read the current text from the system clipboard.
     pub fn get_clipboard(&self) -> Result<String, InjectionError> {
-        let mut cb =
-            Clipboard::new().map_err(|e| InjectionError::ClipboardAccess(e.to_string()))?;
-        cb.get_text()
-            .map_err(|e| InjectionError::ClipboardAccess(e.to_string()))
+        with_clipboard(|cb| cb.get_text())
     }
 
     // -- private helpers ----------------------------------------------------
