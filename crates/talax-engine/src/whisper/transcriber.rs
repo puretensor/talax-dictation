@@ -126,8 +126,10 @@ impl Transcriber {
         if let Some(ref lang) = params.language {
             full_params.set_language(Some(lang.as_str()));
         } else {
+            // A null language detects the language and continues decoding.
+            // detect_language=true is whisper.cpp's detection-only mode and
+            // returns success before producing any transcription segments.
             full_params.set_language(None);
-            full_params.set_detect_language(true);
         }
 
         full_params.set_translate(params.translate);
