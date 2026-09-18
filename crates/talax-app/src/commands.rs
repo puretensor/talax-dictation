@@ -1138,7 +1138,10 @@ pub fn get_runtime_diagnostics(state: State<'_, Mutex<AppState>>) -> RuntimeDiag
     let model_path = state.model_mgr.get_model_path(&state.config.model);
     let model_downloaded = model_path.as_ref().is_some_and(|path| path.exists());
     let microphone_ready = talax_engine::audio::capture::probe_default_input_device().is_ok();
-    let hotkey_ready = state.hotkey_handle.is_some();
+    let hotkey_ready = state
+        .hotkey_handle
+        .as_ref()
+        .is_some_and(HotkeyHandle::is_listening);
 
     let mut warnings = Vec::new();
     if !microphone_ready {

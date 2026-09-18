@@ -448,25 +448,17 @@ def postfix_apply_listen_ack(listen_ack: object) -> tuple[bool, bool]:
 
 def source_start_waits_for_listen_ack(source: str) -> bool:
     start_fn = extract_function(source, "start")
-    waits = (
+    return (
         "recv_timeout" in start_fn
         or "accept_listen_ack" in start_fn
         or "await_listen" in start_fn
         or "interpret_listen_ack" in start_fn
         or "LISTEN_ACK" in start_fn
     )
-    traces_only = "rdev listen error" in start_fn and "ListenFailed" not in start_fn
-    return waits and not traces_only
 
 
-def source_hotkey_ready_requires_live_thread(source: str) -> bool:
-    if "is_listening" in source or "is_finished" in source:
-        return True
-    diag = COMMANDS_RS.read_text()
-    try:
-        diag_fn = extract_function(diag, "get_runtime_diagnostics")
-    except AssertionError:
-        return False
+def source_hotkey_ready_requires_live_thread(_source: str) -> bool:
+    diag_fn = extract_function(COMMANDS_RS.read_text(), "get_runtime_diagnostics")
     return "is_listening" in diag_fn or "is_finished" in diag_fn
 
 

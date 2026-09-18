@@ -7,7 +7,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -276,6 +278,16 @@ impl HotkeyHandle {
         self.stop_flag.store(true, Ordering::SeqCst);
         self.thread.take();
     }
+
+    /// True while the listen thread is still running.
+    ///
+    /// A handle can exist after `rdev::listen` has already returned an error;
+    /// diagnostics must not treat that dead thread as ready.
+    pub fn is_listening(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+    }
 }
 
 impl Drop for HotkeyHandle {
@@ -308,6 +320,10 @@ impl HotkeyListener {
         Ok(())
     }
 
+    /// How long `start` waits for `rdev::listen` to either fail immediately
+    /// or remain blocked inside the OS event loop.
+    const LISTEN_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+
     /// Start the listener on a background thread.
     ///
     /// The `callback` is invoked with [`HotkeyEvent::Pressed`] when the full
@@ -328,6 +344,7 @@ impl HotkeyListener {
         let required: HashSet<Key> = self.config.keys.iter().cloned().collect();
         let mode = self.config.mode;
 
+        let (ack_tx, ack_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
             let mut held: HashSet<Key> = HashSet::new();
             let mut was_active = false;
@@ -383,17 +400,48 @@ impl HotkeyListener {
             };
 
             // rdev::listen blocks until an error or the process exits.
-            // There is no clean shutdown API in rdev, so we just let the
-            // thread terminate when the process exits or the flag is set.
-            if let Err(e) = rdev::listen(cb) {
-                tracing::error!("rdev listen error: {:?}", e);
+            // There is no clean shutdown API in rdev. An immediate Err is
+            // forwarded so start() can refuse to advertise a dead handle.
+            match rdev::listen(cb) {
+                Ok(()) => {
+                    let _ = ack_tx.send(Ok(()));
+                }
+                Err(e) => {
+                    tracing::error!("rdev listen error: {:?}", e);
+                    let _ = ack_tx.send(Err(format!("{e:?}")));
+                }
             }
         });
+
+        if let Err(err) = accept_listen_ack(ack_rx.recv_timeout(Self::LISTEN_ACK_TIMEOUT)) {
+            let _ = handle.join();
+            return Err(err);
+        }
 
         Ok(HotkeyHandle {
             stop_flag,
             thread: Some(handle),
         })
+    }
+}
+
+/// Interpret the listen thread's first ack.
+///
+/// `rdev::listen` either errors immediately or blocks in the OS event loop.
+/// A timeout therefore means the listener is alive. An immediate Ok means
+/// listen returned without blocking; that is not a live listener.
+pub(crate) fn accept_listen_ack(
+    recv: Result<Result<(), String>, mpsc::RecvTimeoutError>,
+) -> Result<(), HotkeyError> {
+    match recv {
+        Ok(Ok(())) => Err(HotkeyError::ListenFailed(
+            "listener exited immediately".into(),
+        )),
+        Ok(Err(err)) => Err(HotkeyError::ListenFailed(err)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(HotkeyError::ListenFailed(
+            "listener thread ended before ack".into(),
+        )),
     }
 }
 
@@ -670,5 +718,27 @@ mod tests {
             mode: HotkeyMode::PushToTalk,
         });
         assert!(listener.validate().is_ok());
+    }
+
+    #[test]
+    fn listen_err_must_fail_start_ack() {
+        let err = accept_listen_ack(Ok(Err("listen failed".into())));
+        assert!(matches!(err, Err(HotkeyError::ListenFailed(_))));
+        assert!(accept_listen_ack(Ok(Ok(()))).is_err());
+        assert!(accept_listen_ack(Err(mpsc::RecvTimeoutError::Disconnected)).is_err());
+        assert!(accept_listen_ack(Err(mpsc::RecvTimeoutError::Timeout)).is_ok());
+    }
+
+    #[test]
+    fn finished_thread_is_not_listening() {
+        let finished = thread::spawn(|| {});
+        while !finished.is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let handle = HotkeyHandle {
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            thread: Some(finished),
+        };
+        assert!(!handle.is_listening());
     }
 }
