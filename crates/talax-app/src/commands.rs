@@ -23,6 +23,7 @@ use crate::recording::{RecordingEvent, RecordingOrchestrator, RecordingState, Tr
 
 /// Application configuration persisted to the Tauri-managed config directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub hotkey: String,
     pub model: String,
@@ -173,14 +174,103 @@ pub fn config_path(config_dir: &Path) -> PathBuf {
     config_dir.join("config.toml")
 }
 
-fn parse_config(contents: &str) -> Option<AppConfig> {
+enum LoadedConfig {
+    Current(AppConfig),
+    MigratedLegacy(AppConfig),
+    Recovered(AppConfig),
+}
+
+impl LoadedConfig {
+    fn into_config(self) -> AppConfig {
+        match self {
+            Self::Current(config) | Self::MigratedLegacy(config) | Self::Recovered(config) => {
+                config
+            }
+        }
+    }
+}
+
+fn is_legacy_config_document(contents: &str) -> bool {
+    let Ok(value) = contents.parse::<toml::Value>() else {
+        return false;
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    let has_mode = table.contains_key("mode");
+    let has_current = [
+        "review_mode",
+        "injection_strategy",
+        "vad_enabled",
+        "pre_roll_ms",
+        "silence_stop_ms",
+    ]
+    .iter()
+    .any(|key| table.contains_key(*key));
+    has_mode && !has_current
+}
+
+fn recover_partial_app_config(contents: &str) -> Option<AppConfig> {
+    let value = contents.parse::<toml::Value>().ok()?;
+    let table = value.as_table()?;
+    let known = [
+        "hotkey",
+        "model",
+        "review_mode",
+        "injection_strategy",
+        "active_profile",
+        "vad_enabled",
+        "pre_roll_ms",
+        "silence_stop_ms",
+    ];
+    if !known.iter().any(|key| table.contains_key(*key)) {
+        return None;
+    }
+
+    let mut config = AppConfig::default();
+    if let Some(value) = table.get("hotkey").and_then(|value| value.as_str()) {
+        config.hotkey = value.to_string();
+    }
+    if let Some(value) = table.get("model").and_then(|value| value.as_str()) {
+        config.model = value.to_string();
+    }
+    if let Some(value) = table.get("review_mode").and_then(|value| value.as_str()) {
+        config.review_mode = value.to_string();
+    }
+    if let Some(value) = table.get("injection_strategy").and_then(|value| value.as_str()) {
+        config.injection_strategy = value.to_string();
+    }
+    if let Some(value) = table.get("active_profile").and_then(|value| value.as_str()) {
+        config.active_profile = value.to_string();
+    }
+    if let Some(value) = table.get("vad_enabled").and_then(|value| value.as_bool()) {
+        config.vad_enabled = value;
+    }
+    if let Some(value) = table.get("pre_roll_ms").and_then(|value| value.as_integer())
+        && let Ok(ms) = u32::try_from(value)
+    {
+        config.pre_roll_ms = ms;
+    }
+    if let Some(value) = table.get("silence_stop_ms").and_then(|value| value.as_integer())
+        && let Ok(ms) = u32::try_from(value)
+    {
+        config.silence_stop_ms = ms;
+    }
+    Some(sanitize_loaded_config(config))
+}
+
+fn parse_config(contents: &str) -> Option<LoadedConfig> {
+    if is_legacy_config_document(contents) {
+        return toml::from_str::<LegacyAppConfig>(contents)
+            .ok()
+            .map(|legacy| {
+                LoadedConfig::MigratedLegacy(sanitize_loaded_config(migrate_legacy_config(legacy)))
+            });
+    }
     if let Ok(config) = toml::from_str::<AppConfig>(contents) {
-        return Some(sanitize_loaded_config(config));
+        return Some(LoadedConfig::Current(sanitize_loaded_config(config)));
     }
-    if let Ok(legacy) = toml::from_str::<LegacyAppConfig>(contents) {
-        return Some(sanitize_loaded_config(migrate_legacy_config(legacy)));
-    }
-    None
+    recover_partial_app_config(contents).map(LoadedConfig::Recovered)
 }
 
 /// Keep unknown `injection_strategy` values from silently becoming auto-paste.
@@ -204,18 +294,50 @@ fn sanitize_loaded_config(mut config: AppConfig) -> AppConfig {
 /// Load config from disk, or create a default one if missing.
 pub fn load_or_create_config(config_dir: &Path) -> AppConfig {
     let path = config_path(config_dir);
-    if let Ok(contents) = std::fs::read_to_string(&path)
-        && let Some(config) = parse_config(&contents)
-    {
-        let _ = save_config_to_disk(config_dir, &config);
-        return config;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match parse_config(&contents) {
+            Some(LoadedConfig::Current(config)) => config,
+            Some(LoadedConfig::MigratedLegacy(config)) => {
+                let _ = save_config_to_disk(config_dir, &config);
+                config
+            }
+            Some(LoadedConfig::Recovered(config)) => {
+                tracing::error!(
+                    path = %path.display(),
+                    "config.toml failed strict parse; keeping the file and using recovered fields plus defaults"
+                );
+                config
+            }
+            None => {
+                tracing::error!(
+                    path = %path.display(),
+                    "config.toml exists but could not be parsed; keeping the file and using in-memory defaults"
+                );
+                AppConfig::default()
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            migrate_home_legacy_or_create(config_dir)
+        }
+        Err(err) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %err,
+                "failed to read config.toml; using in-memory defaults"
+            );
+            AppConfig::default()
+        }
     }
+}
 
+fn migrate_home_legacy_or_create(config_dir: &Path) -> AppConfig {
+    let path = config_path(config_dir);
     let legacy_path = legacy_config_path();
     if legacy_path != path
         && let Ok(contents) = std::fs::read_to_string(&legacy_path)
-        && let Some(config) = parse_config(&contents)
+        && let Some(parsed) = parse_config(&contents)
     {
+        let config = parsed.into_config();
         let _ = save_config_to_disk(config_dir, &config);
         return config;
     }
@@ -273,7 +395,12 @@ fn migrate_legacy_config(legacy: LegacyAppConfig) -> AppConfig {
 }
 
 fn injection_mode_from_config(config: &AppConfig) -> InjectionMode {
-    match config.injection_strategy.as_str() {
+    injection_mode_for_session(config, session_type().as_deref())
+}
+
+fn injection_mode_for_session(config: &AppConfig, session: Option<&str>) -> InjectionMode {
+    let (effective, _) = effective_injection_mode(config, session);
+    match effective.as_str() {
         "type_out" => InjectionMode::TypeOut,
         "clipboard" => InjectionMode::Clipboard,
         "clipboard_only" => InjectionMode::ClipboardOnly,
@@ -1011,7 +1138,10 @@ pub fn get_runtime_diagnostics(state: State<'_, Mutex<AppState>>) -> RuntimeDiag
     let model_path = state.model_mgr.get_model_path(&state.config.model);
     let model_downloaded = model_path.as_ref().is_some_and(|path| path.exists());
     let microphone_ready = talax_engine::audio::capture::probe_default_input_device().is_ok();
-    let hotkey_ready = state.hotkey_handle.is_some();
+    let hotkey_ready = state
+        .hotkey_handle
+        .as_ref()
+        .is_some_and(HotkeyHandle::is_listening);
 
     let mut warnings = Vec::new();
     if !microphone_ready {
@@ -1237,6 +1367,34 @@ mod tests {
     }
 
     #[test]
+    fn wayland_type_out_remap_must_match_the_injector() {
+        let config = AppConfig {
+            injection_strategy: "type_out".to_string(),
+            ..Default::default()
+        };
+        let (effective, ready) = effective_injection_mode(&config, Some("wayland"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(effective, "clipboard_only");
+            assert!(!ready);
+            assert_eq!(
+                injection_mode_for_session(&config, Some("wayland")),
+                InjectionMode::ClipboardOnly,
+                "injector must use the same remap diagnostics advertise"
+            );
+        } else {
+            assert_eq!(effective, "type_out");
+            assert_eq!(
+                injection_mode_for_session(&config, Some("wayland")),
+                InjectionMode::TypeOut
+            );
+        }
+        assert_eq!(
+            injection_mode_for_session(&config, Some("x11")),
+            InjectionMode::TypeOut
+        );
+    }
+
+    #[test]
     fn load_or_create_config_sanitizes_unknown_injection_strategy() {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -1266,6 +1424,68 @@ silence_stop_ms = 700
             injection_mode_from_config(&config),
             InjectionMode::ClipboardOnly
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_or_create_config_does_not_clobber_current_config_on_one_bad_field() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "talax-config-clobber-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = r#"
+hotkey = "Ctrl+Shift+Space"
+model = "small.en-q5_1"
+review_mode = "auto_inject"
+injection_strategy = "clipboard"
+active_profile = "work-devops"
+vad_enabled = true
+pre_roll_ms = "300"
+silence_stop_ms = 700
+"#;
+        std::fs::write(dir.join("config.toml"), original).unwrap();
+        let loaded = load_or_create_config(&dir);
+        let on_disk = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(
+            on_disk.contains("auto_inject"),
+            "parse failure must not rewrite the file: {on_disk}"
+        );
+        assert!(on_disk.contains("work-devops"));
+        assert!(on_disk.contains("pre_roll_ms = \"300\"") || on_disk.contains("pre_roll_ms = '300'"));
+        assert_eq!(loaded.review_mode, "auto_inject");
+        assert_eq!(loaded.injection_strategy, "clipboard");
+        assert_eq!(loaded.active_profile, "work-devops");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_or_create_config_still_migrates_true_legacy_mode_files() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "talax-config-legacy-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            r#"
+hotkey = "Ctrl+Shift+Space"
+model = "small.en-q5_1"
+mode = "auto-inject"
+active_profile = "work-devops"
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_or_create_config(&dir);
+        assert_eq!(loaded.review_mode, "auto_inject");
+        assert_eq!(loaded.injection_strategy, "clipboard");
+        assert_eq!(loaded.active_profile, "work-devops");
 
         let _ = std::fs::remove_dir_all(dir);
     }
