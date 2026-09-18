@@ -395,7 +395,12 @@ fn migrate_legacy_config(legacy: LegacyAppConfig) -> AppConfig {
 }
 
 fn injection_mode_from_config(config: &AppConfig) -> InjectionMode {
-    match config.injection_strategy.as_str() {
+    injection_mode_for_session(config, session_type().as_deref())
+}
+
+fn injection_mode_for_session(config: &AppConfig, session: Option<&str>) -> InjectionMode {
+    let (effective, _) = effective_injection_mode(config, session);
+    match effective.as_str() {
         "type_out" => InjectionMode::TypeOut,
         "clipboard" => InjectionMode::Clipboard,
         "clipboard_only" => InjectionMode::ClipboardOnly,
@@ -1355,6 +1360,34 @@ mod tests {
         assert_eq!(
             injection_mode_from_config(&config),
             InjectionMode::Clipboard
+        );
+    }
+
+    #[test]
+    fn wayland_type_out_remap_must_match_the_injector() {
+        let config = AppConfig {
+            injection_strategy: "type_out".to_string(),
+            ..Default::default()
+        };
+        let (effective, ready) = effective_injection_mode(&config, Some("wayland"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(effective, "clipboard_only");
+            assert!(!ready);
+            assert_eq!(
+                injection_mode_for_session(&config, Some("wayland")),
+                InjectionMode::ClipboardOnly,
+                "injector must use the same remap diagnostics advertise"
+            );
+        } else {
+            assert_eq!(effective, "type_out");
+            assert_eq!(
+                injection_mode_for_session(&config, Some("wayland")),
+                InjectionMode::TypeOut
+            );
+        }
+        assert_eq!(
+            injection_mode_for_session(&config, Some("x11")),
+            InjectionMode::TypeOut
         );
     }
 
