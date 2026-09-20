@@ -237,7 +237,10 @@ fn recover_partial_app_config(contents: &str) -> Option<AppConfig> {
     if let Some(value) = table.get("review_mode").and_then(|value| value.as_str()) {
         config.review_mode = value.to_string();
     }
-    if let Some(value) = table.get("injection_strategy").and_then(|value| value.as_str()) {
+    if let Some(value) = table
+        .get("injection_strategy")
+        .and_then(|value| value.as_str())
+    {
         config.injection_strategy = value.to_string();
     }
     if let Some(value) = table.get("active_profile").and_then(|value| value.as_str()) {
@@ -246,12 +249,16 @@ fn recover_partial_app_config(contents: &str) -> Option<AppConfig> {
     if let Some(value) = table.get("vad_enabled").and_then(|value| value.as_bool()) {
         config.vad_enabled = value;
     }
-    if let Some(value) = table.get("pre_roll_ms").and_then(|value| value.as_integer())
+    if let Some(value) = table
+        .get("pre_roll_ms")
+        .and_then(|value| value.as_integer())
         && let Ok(ms) = u32::try_from(value)
     {
         config.pre_roll_ms = ms;
     }
-    if let Some(value) = table.get("silence_stop_ms").and_then(|value| value.as_integer())
+    if let Some(value) = table
+        .get("silence_stop_ms")
+        .and_then(|value| value.as_integer())
         && let Ok(ms) = u32::try_from(value)
     {
         config.silence_stop_ms = ms;
@@ -1455,7 +1462,9 @@ silence_stop_ms = 700
             "parse failure must not rewrite the file: {on_disk}"
         );
         assert!(on_disk.contains("work-devops"));
-        assert!(on_disk.contains("pre_roll_ms = \"300\"") || on_disk.contains("pre_roll_ms = '300'"));
+        assert!(
+            on_disk.contains("pre_roll_ms = \"300\"") || on_disk.contains("pre_roll_ms = '300'")
+        );
         assert_eq!(loaded.review_mode, "auto_inject");
         assert_eq!(loaded.injection_strategy, "clipboard");
         assert_eq!(loaded.active_profile, "work-devops");
