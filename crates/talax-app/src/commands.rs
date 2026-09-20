@@ -191,7 +191,7 @@ impl LoadedConfig {
 }
 
 fn is_legacy_config_document(contents: &str) -> bool {
-    let Ok(value) = contents.parse::<toml::Value>() else {
+    let Ok(value) = toml::from_str::<toml::Value>(contents) else {
         return false;
     };
     let Some(table) = value.as_table() else {
@@ -211,7 +211,7 @@ fn is_legacy_config_document(contents: &str) -> bool {
 }
 
 fn recover_partial_app_config(contents: &str) -> Option<AppConfig> {
-    let value = contents.parse::<toml::Value>().ok()?;
+    let value = toml::from_str::<toml::Value>(contents).ok()?;
     let table = value.as_table()?;
     let known = [
         "hotkey",
