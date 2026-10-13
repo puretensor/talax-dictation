@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/talax-engine", "crates/talax-app"]
+members = ["crates/talax-engine", "crates/talax-app", "crates/talax-correct"]
 resolver = "2"
 
 [workspace.package]

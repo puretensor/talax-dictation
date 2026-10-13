@@ -3670,6 +3670,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "talax-correct"
+version = "1.13.6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "talax-engine",
+ "tempfile",
+]
+
+[[package]]
 name = "talax-engine"
 version = "1.13.6"
 dependencies = [
