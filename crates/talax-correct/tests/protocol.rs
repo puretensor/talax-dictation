@@ -268,3 +268,74 @@ fn unicode_and_long_text_round_trip() {
     let r = s.ok(json!({"op": "correct", "text": long.trim_end()}));
     assert_eq!(text(&r), long.trim_end());
 }
+
+#[test]
+fn a_take_can_be_learned_from_once() {
+    let prof = profile_with_names(&[]);
+    let mut s = Sidecar::start(prof.path(), None);
+    let r = s.ok(json!({"op": "correct", "text": "ask teebo now", "record": true}));
+    let sid = r["session_id"].as_str().unwrap().to_string();
+    let l = s.ok(json!({"op": "learn", "session_id": sid, "text": "ask Tibo now"}));
+    assert_eq!(l["patterns"], json!([["teebo", "Tibo"]]));
+    let again = s.send(json!({"op": "learn", "session_id": sid, "text": "ask Tibo now"}));
+    assert_eq!(again["ok"], json!(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_dir_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempfile::tempdir().unwrap();
+    let prof = parent.path().join("talax");
+    let mut s = Sidecar::start(&prof, None);
+    s.ok(json!({"op": "health"}));
+    let mode = std::fs::metadata(&prof).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "recorded takes are a log of everything dictated");
+}
+
+#[test]
+fn old_unreviewed_takes_are_pruned_at_start() {
+    let prof = profile_with_names(&[]);
+    // Create the database through a first run, then age two sessions by hand.
+    let mut s = Sidecar::start(prof.path(), None);
+    let a = s.ok(json!({"op": "correct", "text": "old and unreviewed", "record": true}));
+    let b = s.ok(json!({"op": "correct", "text": "old but reviewed", "record": true}));
+    let c = s.ok(json!({"op": "correct", "text": "fresh", "record": true}));
+    let (a, b, c) = (
+        a["session_id"].as_str().unwrap().to_string(),
+        b["session_id"].as_str().unwrap().to_string(),
+        c["session_id"].as_str().unwrap().to_string(),
+    );
+    s.ok(json!({"op": "learn", "session_id": b, "text": "old but reviewed"}));
+    assert!(s.close().success());
+    {
+        let conn = rusqlite::Connection::open(prof.path().join("corrections.db")).unwrap();
+        conn.execute(
+            "UPDATE sessions SET created_at = datetime('now', '-30 days') WHERE id IN (?1, ?2)",
+            rusqlite::params![a, b],
+        )
+        .unwrap();
+    }
+    let mut s = Sidecar::start(prof.path(), None); // default retention: 7 days
+    s.ok(json!({"op": "health"}));
+    assert!(s.close().success());
+    let conn = rusqlite::Connection::open(prof.path().join("corrections.db")).unwrap();
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM sessions ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!ids.contains(&a), "old unreviewed take pruned");
+    assert!(ids.contains(&b), "reviewed takes are training data and stay");
+    assert!(ids.contains(&c), "recent takes stay");
+    let orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM segments WHERE session_id NOT IN (SELECT id FROM sessions)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+}

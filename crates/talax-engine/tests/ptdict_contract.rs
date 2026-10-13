@@ -286,3 +286,153 @@ fn layers_can_be_built_from_names() {
     assert!(l.dictionary && l.heuristic && !l.ngram);
     assert!(Layers::from_names(&["dictionary", "bogus"]).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// 4. Learning from a reviewed take (advisor review, 2026-10-13)
+// ---------------------------------------------------------------------------
+
+/// Record a take the way talax-correct does: raw ASR as the segment's original
+/// text, the pipeline's output staged as its corrected text.
+fn record_take(db: &Database, p: &CorrectionPipeline, id: &str, raw: &str) -> String {
+    db.create_session(id, "", 1.0).unwrap();
+    db.add_segments(id, &[(0.0, 1.0, raw)]).unwrap();
+    let out = p.process(raw).corrected;
+    db.stage_corrections(id, &[(0, out.as_str())]).unwrap();
+    out
+}
+
+fn pattern(db: &Database, original: &str) -> Option<talax_engine::db::RuleInfo> {
+    db.list_rules().unwrap().into_iter().find(|r| r.original == original)
+}
+
+#[test]
+fn learning_takes_only_what_the_user_changed() {
+    let prof = Profile::new(&["Tibo"], Some(&["meet", "today", "and"]));
+    let (db, p) = prof.pipeline();
+    // The pipeline fixes tipo -> Tibo; the user additionally fixes jon -> John.
+    assert_eq!(record_take(&db, &p, "t1", "meet tipo and jon today"), "meet Tibo and jon today");
+    let out = db.learn_from_review("t1", "meet Tibo and John today").unwrap();
+    assert_eq!(out.patterns, vec![("jon".to_string(), "John".to_string())]);
+    assert!(pattern(&db, "tipo").is_none(), "a pipeline fix the user kept is not a new pattern");
+}
+
+#[test]
+fn reverting_a_pipeline_change_confirms_the_word_and_adds_no_pattern() {
+    // No lexicon: "after" is unknown, so the heuristic rewrites it once.
+    let prof = Profile::new(&["Apter"], None);
+    let (db, p) = prof.pipeline();
+    assert_eq!(record_take(&db, &p, "t1", "see you after lunch"), "see you Apter lunch");
+    let out = db.learn_from_review("t1", "see you after lunch").unwrap();
+    assert!(out.patterns.is_empty());
+    assert!(pattern(&db, "apter").is_none());
+    assert!(out.confirmed >= 1);
+    // The confirmed word is now known, so the heuristic leaves it alone.
+    let (_db, p) = prof.pipeline();
+    assert_eq!(correct(&p, "see you after lunch"), "see you after lunch");
+}
+
+#[test]
+fn punctuation_only_edits_teach_nothing() {
+    let prof = Profile::new(&[], None);
+    let (db, p) = prof.pipeline();
+    record_take(&db, &p, "t1", "the quick brown fox, jumped");
+    let out = db.learn_from_review("t1", "the quick brown fox. Jumped").unwrap();
+    assert!(out.patterns.is_empty(), "{:?}", out.patterns);
+    // Punctuation is stripped from both sides of a real fix.
+    record_take(&db, &p, "t2", "ask teebo, now");
+    let out = db.learn_from_review("t2", "ask Tibo, now").unwrap();
+    assert_eq!(out.patterns, vec![("teebo".to_string(), "Tibo".to_string())]);
+}
+
+#[test]
+fn a_take_is_learned_from_at_most_once() {
+    let prof = Profile::new(&[], None);
+    let (db, p) = prof.pipeline();
+    record_take(&db, &p, "t1", "ask teebo now");
+    db.learn_from_review("t1", "ask Tibo now").unwrap();
+    assert!(db.learn_from_review("t1", "ask Tibo now").is_err());
+    assert!(db.learn_from_review("missing", "x").is_err());
+    assert_eq!(pattern(&db, "teebo").unwrap().frequency, 1);
+}
+
+#[test]
+fn three_consistent_reviews_auto_apply() {
+    let prof = Profile::new(&[], None);
+    let (db, p) = prof.pipeline();
+    for i in 0..3 {
+        let id = format!("t{i}");
+        record_take(&db, &p, &id, "ask teebo now");
+        let out = db.learn_from_review(&id, "ask Tibo now").unwrap();
+        assert_eq!(out.auto_apply, usize::from(i == 2));
+    }
+    let (_db, p) = prof.pipeline();
+    assert_eq!(correct(&p, "ask teebo now"), "ask Tibo now");
+}
+
+#[test]
+fn save_corrections_ignores_punctuation_only_edits() {
+    // The TalaX app's editor path gets the same normalisation.
+    let prof = Profile::new(&[], None);
+    let db = prof.db();
+    for i in 0..3 {
+        let id = format!("s{i}");
+        db.create_session(&id, "", 1.0).unwrap();
+        db.add_segments(&id, &[(0.0, 1.0, "the brown fox, jumped")]).unwrap();
+        db.save_corrections(&id, &[(0, "the brown fox. jumped")]).unwrap();
+    }
+    assert!(db.list_rules().unwrap().is_empty(), "{:?}", db.list_rules().unwrap());
+}
+
+#[test]
+fn teach_is_idempotent_and_does_not_bump_frequency() {
+    let prof = Profile::new(&[], None);
+    let db = prof.db();
+    db.teach_rule("Teepo", "Tibo").unwrap();
+    let f = pattern(&db, "teepo").unwrap().frequency;
+    db.teach_rule("Teepo", "Tibo").unwrap();
+    assert_eq!(pattern(&db, "teepo").unwrap().frequency, f);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Layer gating (advisor review, 2026-10-13)
+// ---------------------------------------------------------------------------
+
+fn review(db: &Database, id: &str, text: &str) {
+    db.create_session(id, "", 1.0).unwrap();
+    db.add_segments(id, &[(0.0, 1.0, text)]).unwrap();
+    db.save_corrections(id, &[(0, text)]).unwrap();
+}
+
+#[test]
+fn ngram_layer_only_uses_auto_applied_patterns() {
+    let prof = Profile::new(&[], None);
+    let db = prof.db();
+    for i in 0..6 {
+        review(&db, &format!("r{i}"), "please meet Tibo today at the office");
+    }
+    // One stray edit: frequency 1, not auto-applied.
+    db.create_session("stray", "", 1.0).unwrap();
+    db.add_segments("stray", &[(0.0, 1.0, "please meet teebo today")]).unwrap();
+    db.save_corrections("stray", &[(0, "please meet Tibo today")]).unwrap();
+    assert!(!pattern(&db, "teebo").unwrap().auto_apply);
+    drop(db);
+    let (_db, p) = prof.pipeline();
+    let only_ngram = Layers { dictionary: false, ngram: true, heuristic: false };
+    assert_eq!(
+        p.process_with("please meet teebo today at the office", only_ngram).corrected,
+        "please meet teebo today at the office"
+    );
+}
+
+#[test]
+fn heuristic_runs_even_when_most_words_are_familiar() {
+    let prof = Profile::new(&["Tibo"], None);
+    let db = prof.db();
+    for i in 0..6 {
+        review(&db, &format!("r{i}"), "ask about the plan");
+    }
+    drop(db);
+    let (_db, p) = prof.pipeline();
+    // 4 of 5 words are in the n-gram vocabulary (80%); the heuristic must still run.
+    assert_eq!(correct(&p, "ask about the tipo plan"), "ask about the Tibo plan");
+}
