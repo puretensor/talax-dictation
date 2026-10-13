@@ -74,9 +74,15 @@ fn known_words_are_never_rewritten_into_names() {
     let prof = Profile::new(&["Apter", "Tibo"], Some(&["after", "lunch", "call", "him"]));
     let (_db, p) = prof.pipeline();
     // Observed before this contract: "after" -> "Apter" (edit distance 1, score 2.0).
-    assert_eq!(correct(&p, "I will call him after lunch."), "I will call him after lunch.");
+    assert_eq!(
+        correct(&p, "I will call him after lunch."),
+        "I will call him after lunch."
+    );
     // A word that is not in the lexicon still gets the fuzzy match.
-    assert_eq!(correct(&p, "email Alan Aptor today"), "email Alan Apter today");
+    assert_eq!(
+        correct(&p, "email Alan Aptor today"),
+        "email Alan Apter today"
+    );
 }
 
 #[test]
@@ -102,8 +108,10 @@ fn words_confirmed_in_review_count_as_known() {
     let prof = Profile::new(&["Apter"], None);
     let db = prof.db();
     db.create_session("s1", "", 1.0).unwrap();
-    db.add_segments("s1", &[(0.0, 1.0, "see you after lunch")]).unwrap();
-    db.save_corrections("s1", &[(0, "see you after lunch")]).unwrap();
+    db.add_segments("s1", &[(0.0, 1.0, "see you after lunch")])
+        .unwrap();
+    db.save_corrections("s1", &[(0, "see you after lunch")])
+        .unwrap();
     drop(db);
     let (_db, p) = prof.pipeline();
     assert_eq!(correct(&p, "see you after lunch"), "see you after lunch");
@@ -128,7 +136,10 @@ fn short_tokens_need_phonetic_or_frequency_evidence() {
 
 #[test]
 fn punctuation_around_a_corrected_word_is_kept() {
-    let prof = Profile::new(&["Tibo", "OpenAI", "API"], Some(&["and", "too", "said", "the", "is", "up"]));
+    let prof = Profile::new(
+        &["Tibo", "OpenAI", "API"],
+        Some(&["and", "too", "said", "the", "is", "up"]),
+    );
     let (_db, p) = prof.pipeline();
     assert_eq!(correct(&p, "Tipo, and Tipo, too."), "Tibo, and Tibo, too.");
     assert_eq!(correct(&p, "(Tipo) said"), "(Tibo) said");
@@ -143,7 +154,11 @@ fn heuristic_changes_report_the_whole_token() {
     let prof = Profile::new(&["Tibo"], Some(&["too"]));
     let (_db, p) = prof.pipeline();
     let r = p.process("Tipo, too");
-    let c = r.changes.iter().find(|c| c.layer == "heuristic").expect("a heuristic change");
+    let c = r
+        .changes
+        .iter()
+        .find(|c| c.layer == "heuristic")
+        .expect("a heuristic change");
     assert_eq!(c.original, "Tipo,");
     assert_eq!(c.corrected, "Tibo,");
 }
@@ -167,7 +182,10 @@ fn taught_multi_word_rule_applies() {
     let prof = Profile::new(&[], None);
     prof.db().teach_rule("Josh Rosen", "Joshua Rose").unwrap();
     let (_db, p) = prof.pipeline();
-    assert_eq!(correct(&p, "email Josh Rosen today"), "email Joshua Rose today");
+    assert_eq!(
+        correct(&p, "email Josh Rosen today"),
+        "email Joshua Rose today"
+    );
 }
 
 #[test]
@@ -180,7 +198,10 @@ fn taught_rule_survives_auto_apply_rebuild() {
     db.add_segments("s1", &[(0.0, 1.0, "hello world")]).unwrap();
     db.save_corrections("s1", &[(0, "hello there")]).unwrap();
     let rules = db.list_rules().unwrap();
-    let r = rules.iter().find(|r| r.original == "teepo").expect("taught rule listed");
+    let r = rules
+        .iter()
+        .find(|r| r.original == "teepo")
+        .expect("taught rule listed");
     assert!(r.manual);
     assert!(r.auto_apply);
     assert_eq!(r.corrected, "Tibo");
@@ -192,7 +213,12 @@ fn teaching_twice_keeps_one_rule() {
     let db = prof.db();
     db.teach_rule("Teepo", "Tibo").unwrap();
     db.teach_rule("teepo", "Tibo").unwrap();
-    let n = db.list_rules().unwrap().iter().filter(|r| r.original == "teepo").count();
+    let n = db
+        .list_rules()
+        .unwrap()
+        .iter()
+        .filter(|r| r.original == "teepo")
+        .count();
     assert_eq!(n, 1);
 }
 
@@ -216,11 +242,15 @@ fn learned_rules_are_listed_as_not_manual() {
     for i in 0..3 {
         let id = format!("s{i}");
         db.create_session(&id, "", 1.0).unwrap();
-        db.add_segments(&id, &[(0.0, 1.0, "meet teebo today")]).unwrap();
+        db.add_segments(&id, &[(0.0, 1.0, "meet teebo today")])
+            .unwrap();
         db.save_corrections(&id, &[(0, "meet Tibo today")]).unwrap();
     }
     let rules = db.list_rules().unwrap();
-    let r = rules.iter().find(|r| r.original == "teebo").expect("learned rule listed");
+    let r = rules
+        .iter()
+        .find(|r| r.original == "teebo")
+        .expect("learned rule listed");
     assert!(!r.manual);
     assert!(r.auto_apply);
     assert_eq!(r.frequency, 3);
@@ -254,7 +284,10 @@ fn database_from_before_manual_rules_migrates_in_place() {
     let db = Database::open(&path).unwrap();
     db.teach_rule("Teepo", "Tibo").unwrap();
     let rules = db.list_rules().unwrap();
-    let old = rules.iter().find(|r| r.original == "aptor").expect("old row kept");
+    let old = rules
+        .iter()
+        .find(|r| r.original == "aptor")
+        .expect("old row kept");
     assert!(!old.manual);
     assert!(old.auto_apply);
     assert!(rules.iter().any(|r| r.original == "teepo" && r.manual));
@@ -276,7 +309,10 @@ fn dictionary_only_skips_the_heuristic_layer() {
     assert_eq!(r.corrected, "tipo and TalaX");
     assert!(r.changes.iter().all(|c| c.layer == "dictionary"));
     // process() is process_with(ALL).
-    assert_eq!(p.process_with("tipo and Talak", Layers::ALL).corrected, "Tibo and TalaX");
+    assert_eq!(
+        p.process_with("tipo and Talak", Layers::ALL).corrected,
+        "Tibo and TalaX"
+    );
     assert_eq!(p.process("tipo and Talak").corrected, "Tibo and TalaX");
 }
 
@@ -302,7 +338,10 @@ fn record_take(db: &Database, p: &CorrectionPipeline, id: &str, raw: &str) -> St
 }
 
 fn pattern(db: &Database, original: &str) -> Option<talax_engine::db::RuleInfo> {
-    db.list_rules().unwrap().into_iter().find(|r| r.original == original)
+    db.list_rules()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.original == original)
 }
 
 #[test]
@@ -310,10 +349,18 @@ fn learning_takes_only_what_the_user_changed() {
     let prof = Profile::new(&["Tibo"], Some(&["meet", "today", "and"]));
     let (db, p) = prof.pipeline();
     // The pipeline fixes tipo -> Tibo; the user additionally fixes jon -> John.
-    assert_eq!(record_take(&db, &p, "t1", "meet tipo and jon today"), "meet Tibo and jon today");
-    let out = db.learn_from_review("t1", "meet Tibo and John today").unwrap();
+    assert_eq!(
+        record_take(&db, &p, "t1", "meet tipo and jon today"),
+        "meet Tibo and jon today"
+    );
+    let out = db
+        .learn_from_review("t1", "meet Tibo and John today")
+        .unwrap();
     assert_eq!(out.patterns, vec![("jon".to_string(), "John".to_string())]);
-    assert!(pattern(&db, "tipo").is_none(), "a pipeline fix the user kept is not a new pattern");
+    assert!(
+        pattern(&db, "tipo").is_none(),
+        "a pipeline fix the user kept is not a new pattern"
+    );
 }
 
 #[test]
@@ -321,7 +368,10 @@ fn reverting_a_pipeline_change_confirms_the_word_and_adds_no_pattern() {
     // No lexicon: "after" is unknown, so the heuristic rewrites it once.
     let prof = Profile::new(&["Apter"], None);
     let (db, p) = prof.pipeline();
-    assert_eq!(record_take(&db, &p, "t1", "see you after lunch"), "see you Apter lunch");
+    assert_eq!(
+        record_take(&db, &p, "t1", "see you after lunch"),
+        "see you Apter lunch"
+    );
     let out = db.learn_from_review("t1", "see you after lunch").unwrap();
     assert!(out.patterns.is_empty());
     assert!(pattern(&db, "apter").is_none());
@@ -336,12 +386,17 @@ fn punctuation_only_edits_teach_nothing() {
     let prof = Profile::new(&[], None);
     let (db, p) = prof.pipeline();
     record_take(&db, &p, "t1", "the quick brown fox, jumped");
-    let out = db.learn_from_review("t1", "the quick brown fox. Jumped").unwrap();
+    let out = db
+        .learn_from_review("t1", "the quick brown fox. Jumped")
+        .unwrap();
     assert!(out.patterns.is_empty(), "{:?}", out.patterns);
     // Punctuation is stripped from both sides of a real fix.
     record_take(&db, &p, "t2", "ask teebo, now");
     let out = db.learn_from_review("t2", "ask Tibo, now").unwrap();
-    assert_eq!(out.patterns, vec![("teebo".to_string(), "Tibo".to_string())]);
+    assert_eq!(
+        out.patterns,
+        vec![("teebo".to_string(), "Tibo".to_string())]
+    );
 }
 
 #[test]
@@ -377,10 +432,16 @@ fn save_corrections_ignores_punctuation_only_edits() {
     for i in 0..3 {
         let id = format!("s{i}");
         db.create_session(&id, "", 1.0).unwrap();
-        db.add_segments(&id, &[(0.0, 1.0, "the brown fox, jumped")]).unwrap();
-        db.save_corrections(&id, &[(0, "the brown fox. jumped")]).unwrap();
+        db.add_segments(&id, &[(0.0, 1.0, "the brown fox, jumped")])
+            .unwrap();
+        db.save_corrections(&id, &[(0, "the brown fox. jumped")])
+            .unwrap();
     }
-    assert!(db.list_rules().unwrap().is_empty(), "{:?}", db.list_rules().unwrap());
+    assert!(
+        db.list_rules().unwrap().is_empty(),
+        "{:?}",
+        db.list_rules().unwrap()
+    );
 }
 
 #[test]
@@ -408,18 +469,29 @@ fn ngram_layer_only_uses_auto_applied_patterns() {
     let prof = Profile::new(&[], None);
     let db = prof.db();
     for i in 0..6 {
-        review(&db, &format!("r{i}"), "please meet Tibo today at the office");
+        review(
+            &db,
+            &format!("r{i}"),
+            "please meet Tibo today at the office",
+        );
     }
     // One stray edit: frequency 1, not auto-applied.
     db.create_session("stray", "", 1.0).unwrap();
-    db.add_segments("stray", &[(0.0, 1.0, "please meet teebo today")]).unwrap();
-    db.save_corrections("stray", &[(0, "please meet Tibo today")]).unwrap();
+    db.add_segments("stray", &[(0.0, 1.0, "please meet teebo today")])
+        .unwrap();
+    db.save_corrections("stray", &[(0, "please meet Tibo today")])
+        .unwrap();
     assert!(!pattern(&db, "teebo").unwrap().auto_apply);
     drop(db);
     let (_db, p) = prof.pipeline();
-    let only_ngram = Layers { dictionary: false, ngram: true, heuristic: false };
+    let only_ngram = Layers {
+        dictionary: false,
+        ngram: true,
+        heuristic: false,
+    };
     assert_eq!(
-        p.process_with("please meet teebo today at the office", only_ngram).corrected,
+        p.process_with("please meet teebo today at the office", only_ngram)
+            .corrected,
         "please meet teebo today at the office"
     );
 }
@@ -434,5 +506,19 @@ fn heuristic_runs_even_when_most_words_are_familiar() {
     drop(db);
     let (_db, p) = prof.pipeline();
     // 4 of 5 words are in the n-gram vocabulary (80%); the heuristic must still run.
-    assert_eq!(correct(&p, "ask about the tipo plan"), "ask about the Tibo plan");
+    assert_eq!(
+        correct(&p, "ask about the tipo plan"),
+        "ask about the Tibo plan"
+    );
+}
+
+#[test]
+fn casing_only_rules_can_be_taught() {
+    // ptdictd's existing rule set has puretensor -> PureTensor; it must survive the import.
+    let prof = Profile::new(&[], None);
+    let db = prof.db();
+    db.teach_rule("puretensor", "PureTensor").unwrap();
+    assert!(db.teach_rule("PureTensor", "PureTensor").is_err());
+    let (_db, p) = prof.pipeline();
+    assert_eq!(correct(&p, "puretensor rocks"), "PureTensor rocks");
 }

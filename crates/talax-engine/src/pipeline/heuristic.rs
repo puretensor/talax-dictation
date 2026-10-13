@@ -8,7 +8,7 @@
 //! - Number/code normalization for ASR output
 //! - Context-aware candidate scoring
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::Change;
 
@@ -50,6 +50,8 @@ pub struct HeuristicExpander {
     bigram_compounds: HashMap<(String, String), String>,
     /// Word frequency from n-gram model (lowercase -> count)
     word_frequencies: HashMap<String, u32>,
+    /// Words the fuzzy step must not rewrite (lexicon ∪ confirmed usages ∪ n-gram vocab)
+    known_words: HashSet<String>,
 }
 
 impl Default for HeuristicExpander {
@@ -67,6 +69,7 @@ impl HeuristicExpander {
             compound_forms: HashMap::new(),
             bigram_compounds: HashMap::new(),
             word_frequencies: HashMap::new(),
+            known_words: HashSet::new(),
         }
     }
 
@@ -84,6 +87,11 @@ impl HeuristicExpander {
     /// Set word frequencies from the n-gram model vocabulary.
     pub fn set_word_frequencies(&mut self, freqs: HashMap<String, u32>) {
         self.word_frequencies = freqs;
+    }
+
+    /// Words the fuzzy matcher must leave alone.
+    pub fn set_known_words(&mut self, words: HashSet<String>) {
+        self.known_words = words.into_iter().map(|w| w.to_lowercase()).collect();
     }
 
     /// Add a known compound form explicitly.
@@ -155,61 +163,93 @@ impl HeuristicExpander {
         // Phase 1: Bigram compound detection (must happen before single-word passes)
         self.apply_bigram_compounds(&mut words, &mut changes);
 
-        // Phase 2: Per-word corrections
+        // Phase 2: Per-word corrections (operate on the alphanumeric core)
         let mut i = 0;
         while i < words.len() {
-            let word_lower = words[i].to_lowercase();
+            let token = words[i].clone();
+            let (prefix, core, suffix) = split_affixes(&token);
+            if core.is_empty() {
+                i += 1;
+                continue;
+            }
+            let core_lower = core.to_lowercase();
 
             // 2a. Direct accent pattern match
-            if let Some(correct) = self.accent_patterns.get(&word_lower)
-                && *correct != words[i]
+            if let Some(correct) = self.accent_patterns.get(&core_lower)
+                && correct != core
             {
-                changes.push(self.make_change(i, &words[i], correct));
-                words[i] = correct.clone();
+                let replacement = reattach(prefix, correct, suffix);
+                if replacement != token {
+                    changes.push(self.make_change(i, &token, &replacement));
+                    words[i] = replacement;
+                }
                 i += 1;
                 continue;
             }
 
             // 2b. Compound word splitting: "cpuzero" -> "cpu-node-0"
-            if let Some(correct) = self.compound_forms.get(&word_lower)
-                && *correct != words[i]
+            if let Some(correct) = self.compound_forms.get(&core_lower)
+                && correct != core
             {
-                changes.push(self.make_change(i, &words[i], correct));
-                words[i] = correct.clone();
+                let replacement = reattach(prefix, correct, suffix);
+                if replacement != token {
+                    changes.push(self.make_change(i, &token, &replacement));
+                    words[i] = replacement;
+                }
                 i += 1;
                 continue;
             }
 
             // 2c. Acronym detection and case fix
-            if let Some(correct) = self.check_acronym(&words[i])
-                && correct != words[i]
+            if let Some(correct) = self.check_acronym(core)
+                && correct != core
             {
-                changes.push(self.make_change(i, &words[i], &correct));
-                words[i] = correct;
+                let replacement = reattach(prefix, &correct, suffix);
+                if replacement != token {
+                    changes.push(self.make_change(i, &token, &replacement));
+                    words[i] = replacement;
+                }
                 i += 1;
                 continue;
             }
 
             // 2d. Exact vocabulary wins over fuzzy alternatives, including
             // words whose casing is already correct.
-            if let Some(correct) = self.proper_nouns.get(&word_lower) {
-                if words[i] != *correct {
-                    changes.push(self.make_change(i, &words[i], correct));
-                    words[i] = correct.clone();
+            if let Some(correct) = self.proper_nouns.get(&core_lower) {
+                if core != *correct {
+                    let replacement = reattach(prefix, correct, suffix);
+                    if replacement != token {
+                        changes.push(self.make_change(i, &token, &replacement));
+                        words[i] = replacement;
+                    }
                 }
                 i += 1;
                 continue;
             }
 
             // 2e. Context-aware scored matching against proper nouns
-            if word_lower.len() >= 3
-                && let Some(best) = self.best_scored_candidate(&word_lower)
-                && best.text != words[i]
-            {
-                changes.push(self.make_change(i, &words[i], &best.text));
-                words[i] = best.text;
+            if self.known_words.contains(&core_lower) || is_all_caps_acronym(core) {
                 i += 1;
                 continue;
+            }
+            if core_lower.chars().count() >= 3
+                && let Some(best) = self.best_scored_candidate(&core_lower)
+            {
+                let short = core.chars().count() <= 4;
+                let has_evidence = best.phonetic_match || best.frequency.is_some_and(|f| f > 3);
+                if short && !has_evidence {
+                    i += 1;
+                    continue;
+                }
+                if best.text != core {
+                    let replacement = reattach(prefix, &best.text, suffix);
+                    if replacement != token {
+                        changes.push(self.make_change(i, &token, &replacement));
+                        words[i] = replacement;
+                    }
+                    i += 1;
+                    continue;
+                }
             }
 
             i += 1;
@@ -469,6 +509,27 @@ impl HeuristicExpander {
             corrected_score: None,
         }
     }
+}
+
+/// Split leading/trailing non-alphanumeric characters from a token's core.
+fn split_affixes(token: &str) -> (&str, &str, &str) {
+    let Some(start) = token.find(|c: char| c.is_alphanumeric()) else {
+        return ("", "", token);
+    };
+    let Some(last) = token.rfind(|c: char| c.is_alphanumeric()) else {
+        return ("", "", token);
+    };
+    let last_len = token[last..].chars().next().map_or(0, char::len_utf8);
+    let end = last + last_len;
+    (&token[..start], &token[start..end], &token[end..])
+}
+
+fn reattach(prefix: &str, core: &str, suffix: &str) -> String {
+    format!("{prefix}{core}{suffix}")
+}
+
+fn is_all_caps_acronym(core: &str) -> bool {
+    core.chars().count() >= 2 && core.chars().all(char::is_uppercase)
 }
 
 // ---------------------------------------------------------------------------

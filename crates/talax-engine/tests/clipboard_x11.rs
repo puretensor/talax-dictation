@@ -1,6 +1,6 @@
 //! Run only inside an isolated X server without a clipboard manager:
 //! `xvfb-run -a cargo test -p talax-engine --test clipboard_x11 -- --ignored`
-#![cfg(target_os = "linux")]
+#![cfg(all(feature = "runtime", target_os = "linux"))]
 
 use std::process::Command;
 use talax_engine::inject::{InjectionConfig, TextInjector, release_clipboard};

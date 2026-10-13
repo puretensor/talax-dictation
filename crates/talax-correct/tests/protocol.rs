@@ -51,7 +51,11 @@ impl Sidecar {
             }
         });
         let stdin = child.stdin.take();
-        Self { child, stdin, lines: rx }
+        Self {
+            child,
+            stdin,
+            lines: rx,
+        }
     }
 
     fn raw(&mut self, line: &str) -> Value {
@@ -60,7 +64,8 @@ impl Sidecar {
         stdin.write_all(b"\n").unwrap();
         stdin.flush().unwrap();
         let reply = self.lines.recv_timeout(TIMEOUT).expect("one response line");
-        serde_json::from_str(&reply).unwrap_or_else(|e| panic!("response is not JSON ({e}): {reply}"))
+        serde_json::from_str(&reply)
+            .unwrap_or_else(|e| panic!("response is not JSON ({e}): {reply}"))
     }
 
     fn send(&mut self, req: Value) -> Value {
@@ -103,7 +108,9 @@ fn profile_with_names(names: &[&str]) -> tempfile::TempDir {
 }
 
 fn text(r: &Value) -> &str {
-    r["text"].as_str().unwrap_or_else(|| panic!("no text in {r}"))
+    r["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text in {r}"))
 }
 
 #[test]
@@ -116,7 +123,10 @@ fn health_reports_version_and_state() {
     assert_eq!(r["proper_nouns"], json!(1));
     assert!(r["lexicon"].is_number());
     assert!(r["ngram_trained"].is_boolean());
-    assert!(prof.path().join("corrections.db").exists(), "the profile database is created on start");
+    assert!(
+        prof.path().join("corrections.db").exists(),
+        "the profile database is created on start"
+    );
 }
 
 #[test]
@@ -124,7 +134,10 @@ fn request_id_is_echoed() {
     let prof = profile_with_names(&[]);
     let mut s = Sidecar::start(prof.path(), None);
     assert_eq!(s.ok(json!({"id": 7, "op": "health"}))["id"], json!(7));
-    assert_eq!(s.ok(json!({"id": "a-1", "op": "health"}))["id"], json!("a-1"));
+    assert_eq!(
+        s.ok(json!({"id": "a-1", "op": "health"}))["id"],
+        json!("a-1")
+    );
 }
 
 #[test]
@@ -140,14 +153,21 @@ fn teach_then_correct() {
     assert_eq!(changes[0]["layer"], json!("dictionary"));
     assert_eq!(changes[0]["original"], json!("Teepo"));
     assert_eq!(changes[0]["corrected"], json!("Tibo"));
-    assert_eq!(r["session_id"], Value::Null, "no session unless record is set");
+    assert_eq!(
+        r["session_id"],
+        Value::Null,
+        "no session unless record is set"
+    );
 }
 
 #[test]
 fn names_drive_the_heuristic_layer_and_layers_can_be_limited() {
     let prof = profile_with_names(&["Tibo"]);
     let mut s = Sidecar::start(prof.path(), None);
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "Tipo, too."}))), "Tibo, too.");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "Tipo, too."}))),
+        "Tibo, too."
+    );
     let r = s.ok(json!({"op": "correct", "text": "Tipo, too.", "layers": ["dictionary"]}));
     assert_eq!(text(&r), "Tipo, too.");
     let r = s.send(json!({"op": "correct", "text": "x", "layers": ["nonsense"]}));
@@ -158,7 +178,10 @@ fn names_drive_the_heuristic_layer_and_layers_can_be_limited() {
 fn reload_picks_up_a_changed_names_file() {
     let prof = profile_with_names(&[]);
     let mut s = Sidecar::start(prof.path(), None);
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "ask tipo"}))), "ask tipo");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "ask tipo"}))),
+        "ask tipo"
+    );
     std::fs::write(
         prof.path().join("domain_context.json"),
         json!({ "all_proper_nouns": ["Tibo"] }).to_string(),
@@ -166,7 +189,10 @@ fn reload_picks_up_a_changed_names_file() {
     .unwrap();
     let r = s.ok(json!({"op": "reload"}));
     assert_eq!(r["proper_nouns"], json!(1));
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "ask tipo"}))), "ask Tibo");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "ask tipo"}))),
+        "ask Tibo"
+    );
 }
 
 #[test]
@@ -176,8 +202,14 @@ fn lexicon_protects_common_words() {
     std::fs::write(&lex, "after\nlunch\nemail\n").unwrap();
     let mut s = Sidecar::start(prof.path(), Some(&lex));
     assert_eq!(s.ok(json!({"op": "health"}))["lexicon"], json!(3));
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "after lunch"}))), "after lunch");
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "email Aptor"}))), "email Apter");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "after lunch"}))),
+        "after lunch"
+    );
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "email Aptor"}))),
+        "email Apter"
+    );
 }
 
 #[test]
@@ -187,7 +219,10 @@ fn recorded_takes_teach_after_three_consistent_fixes() {
     for _ in 0..3 {
         let r = s.ok(json!({"op": "correct", "text": "meet Teebo today", "record": true}));
         assert_eq!(text(&r), "meet Teebo today");
-        let sid = r["session_id"].as_str().expect("record returns a session id").to_string();
+        let sid = r["session_id"]
+            .as_str()
+            .expect("record returns a session id")
+            .to_string();
         let l = s.ok(json!({"op": "learn", "session_id": sid, "text": "meet Tibo today"}));
         assert!(l["auto_apply"].is_number());
     }
@@ -218,7 +253,10 @@ fn rules_and_forget() {
     assert_eq!(rules[0]["auto_apply"], json!(true));
     let r = s.ok(json!({"op": "forget", "original": "teepo"}));
     assert_eq!(r["removed"], json!(1));
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "Teepo"}))), "Teepo");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "Teepo"}))),
+        "Teepo"
+    );
 }
 
 #[test]
@@ -235,7 +273,10 @@ fn bad_input_is_answered_and_the_sidecar_keeps_serving() {
     ] {
         let r = s.raw(&bad);
         assert_eq!(r["ok"], json!(false), "{bad} -> {r}");
-        assert!(r["error"].as_str().is_some_and(|e| !e.is_empty()), "{bad} -> {r}");
+        assert!(
+            r["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "{bad} -> {r}"
+        );
     }
     s.ok(json!({"op": "health"}));
 }
@@ -247,7 +288,10 @@ fn rules_persist_across_restarts() {
     s.ok(json!({"op": "teach", "original": "Talak", "corrected": "TalaX"}));
     assert!(s.close().success());
     let mut s = Sidecar::start(prof.path(), None);
-    assert_eq!(text(&s.ok(json!({"op": "correct", "text": "the Talak system"}))), "the TalaX system");
+    assert_eq!(
+        text(&s.ok(json!({"op": "correct", "text": "the Talak system"}))),
+        "the TalaX system"
+    );
 }
 
 #[test]
@@ -290,7 +334,10 @@ fn profile_dir_is_private() {
     let mut s = Sidecar::start(&prof, None);
     s.ok(json!({"op": "health"}));
     let mode = std::fs::metadata(&prof).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700, "recorded takes are a log of everything dictated");
+    assert_eq!(
+        mode, 0o700,
+        "recorded takes are a log of everything dictated"
+    );
 }
 
 #[test]
@@ -328,7 +375,10 @@ fn old_unreviewed_takes_are_pruned_at_start() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert!(!ids.contains(&a), "old unreviewed take pruned");
-    assert!(ids.contains(&b), "reviewed takes are training data and stay");
+    assert!(
+        ids.contains(&b),
+        "reviewed takes are training data and stay"
+    );
     assert!(ids.contains(&c), "recent takes stay");
     let orphans: i64 = conn
         .query_row(

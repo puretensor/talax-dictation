@@ -29,6 +29,45 @@ pub struct PipelineResult {
     pub layers_used: Vec<String>,
 }
 
+/// Which correction layers to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layers {
+    pub dictionary: bool,
+    pub ngram: bool,
+    pub heuristic: bool,
+}
+
+impl Layers {
+    pub const ALL: Self = Self {
+        dictionary: true,
+        ngram: true,
+        heuristic: true,
+    };
+
+    pub const DICTIONARY_ONLY: Self = Self {
+        dictionary: true,
+        ngram: false,
+        heuristic: false,
+    };
+
+    pub fn from_names(names: &[&str]) -> Result<Self, String> {
+        let mut layers = Self {
+            dictionary: false,
+            ngram: false,
+            heuristic: false,
+        };
+        for name in names {
+            match *name {
+                "dictionary" => layers.dictionary = true,
+                "ngram" => layers.ngram = true,
+                "heuristic" => layers.heuristic = true,
+                other => return Err(format!("unknown layer '{other}'")),
+            }
+        }
+        Ok(layers)
+    }
+}
+
 /// Three-layer correction pipeline: Dictionary -> N-gram -> Heuristic.
 pub struct CorrectionPipeline {
     pub dict_corrector: DictionaryCorrector,
@@ -57,7 +96,7 @@ impl CorrectionPipeline {
 
     /// Reload all corrector state from the database/model files.
     pub fn try_reload(&mut self, db: &crate::db::Database) -> rusqlite::Result<()> {
-        let patterns = db.get_all_patterns()?;
+        let patterns = db.get_auto_corrections()?;
         let training_texts = db.get_training_texts()?;
 
         self.dict_corrector.try_reload(db)?;
@@ -66,6 +105,11 @@ impl CorrectionPipeline {
         self.heuristic_expander.reload(db);
         self.heuristic_expander
             .set_word_frequencies(self.ngram_corrector.word_frequencies());
+
+        let mut known = db.get_lexicon();
+        known.extend(db.get_correct_usage_words()?);
+        known.extend(self.ngram_corrector.vocab().iter().cloned());
+        self.heuristic_expander.set_known_words(known);
         Ok(())
     }
 
@@ -76,25 +120,40 @@ impl CorrectionPipeline {
         }
     }
 
+    /// Reload only what a rule change affects (dictionary rules and the n-gram corrections
+    /// index). Cheap: unlike `try_reload` it does not re-read the lexicon or retrain the
+    /// n-gram model, so a host can teach many rules in a row.
+    pub fn reload_rules(&mut self, db: &crate::db::Database) -> rusqlite::Result<()> {
+        self.dict_corrector.try_reload(db)?;
+        let patterns = db.get_auto_corrections()?;
+        self.ngram_corrector
+            .set_corrections_index_from_patterns(&patterns);
+        Ok(())
+    }
+
     /// Run the full correction pipeline on ASR output.
     pub fn process(&self, text: &str) -> PipelineResult {
+        self.process_with(text, Layers::ALL)
+    }
+
+    /// Run a selected subset of correction layers.
+    pub fn process_with(&self, text: &str, layers: Layers) -> PipelineResult {
         let mut current = text.to_string();
         let mut all_changes = Vec::new();
 
-        // Layer 1: Dictionary substitution (<1ms)
-        let (corrected, dict_changes) = self.dict_corrector.apply(&current);
-        current = corrected;
-        all_changes.extend(dict_changes);
+        if layers.dictionary {
+            let (corrected, dict_changes) = self.dict_corrector.apply(&current);
+            current = corrected;
+            all_changes.extend(dict_changes);
+        }
 
-        // Layer 2: N-gram corrections (<50ms)
-        if self.ngram_corrector.is_trained() {
+        if layers.ngram && self.ngram_corrector.is_trained() {
             let (corrected, ngram_changes) = self.ngram_corrector.apply(&current);
             current = corrected;
             all_changes.extend(ngram_changes);
         }
 
-        // Layer 3: Heuristic expander (<10ms)
-        if self.needs_heuristic_review(&current) {
+        if layers.heuristic {
             let (corrected, heuristic_changes) = self.heuristic_expander.apply(&current);
             current = corrected;
             all_changes.extend(heuristic_changes);
@@ -112,21 +171,5 @@ impl CorrectionPipeline {
             changes: all_changes,
             layers_used,
         }
-    }
-
-    fn needs_heuristic_review(&self, text: &str) -> bool {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.is_empty() {
-            return false;
-        }
-        if !self.ngram_corrector.is_trained() {
-            return true;
-        }
-        let known = words
-            .iter()
-            .filter(|w| self.ngram_corrector.vocab().contains(&w.to_lowercase()))
-            .count();
-        let ratio = known as f64 / words.len() as f64;
-        ratio < 0.8
     }
 }
