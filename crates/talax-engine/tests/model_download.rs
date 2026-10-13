@@ -1,5 +1,6 @@
 //! Optional network regression using the smallest catalogue model.
 //! `TALAX_TEST_DOWNLOAD_DIR=/path/to/scratch cargo test -p talax-engine --test model_download -- --ignored`
+#![cfg(feature = "runtime")]
 use talax_engine::whisper::model_manager::ModelManager;
 use talax_engine::whisper::transcriber::Transcriber;
 

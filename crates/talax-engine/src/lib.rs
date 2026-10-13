@@ -1,7 +1,11 @@
+#[cfg(feature = "runtime")]
 pub mod audio;
 pub mod db;
+#[cfg(feature = "runtime")]
 pub mod hotkey;
+#[cfg(feature = "runtime")]
 pub mod inject;
 pub mod pipeline;
 pub mod profile;
+#[cfg(feature = "runtime")]
 pub mod whisper;

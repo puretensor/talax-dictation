@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:cpal",
+    "dep:whisper-rs",
+    "dep:rdev",
+    "dep:arboard",
+    "dep:enigo",
+    "dep:ureq",
+    "dep:sha2",
+    "dep:memmap2",
+]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -11,22 +24,34 @@ rusqlite = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ureq = "3"
+ureq = { version = "3", optional = true }
 # Floor at 0.18.2 so a lock regeneration cannot silently drop back to
 # 0.18.0/0.18.1. 0.18.2 reports capture xruns as ErrorKind::Xrun and
 # stops treating a nonzero but sub-millisecond ALSA stream timeout as a
 # non-blocking poll.
-cpal = "0.18.2"
-whisper-rs = "0.16"
-rdev = "0.5"
-arboard = "3"
-enigo = { version = "0.6", features = ["serde"] }
-sha2 = "0.10"
+cpal = { version = "0.18.2", optional = true }
+whisper-rs = { version = "0.16", optional = true }
+rdev = { version = "0.5", optional = true }
+arboard = { version = "3", optional = true }
+enigo = { version = "0.6", features = ["serde"], optional = true }
+sha2 = { version = "0.10", optional = true }
 # Not used directly. Floor on the Enigo/XKB graph: PRs #50/#51 patched
 # Cargo.lock to memmap2 0.9.11 (RUSTSEC-2026-0186); later lock
 # regenerations silently fell back to 0.9.10. A floor survives
 # regeneration; a bare lock entry does not.
-memmap2 = "0.9.11"
+memmap2 = { version = "0.9.11", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "clipboard_x11"
+required-features = ["runtime"]
+
+[[test]]
+name = "model_download"
+required-features = ["runtime"]
+
+[[test]]
+name = "transcription_model"
+required-features = ["runtime"]

@@ -1,6 +1,7 @@
 //! Optional real-model regression. Supply a GGML English-capable model and
 //! a short English speech fixture as mono 16 kHz signed 16-bit little-endian PCM.
 //! `TALAX_TEST_MODEL=... TALAX_TEST_PCM=... cargo test -p talax-engine --test transcription_model -- --ignored`
+#![cfg(feature = "runtime")]
 use std::path::PathBuf;
 use talax_engine::whisper::transcriber::{TranscribeParams, Transcriber};
 

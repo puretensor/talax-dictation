@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/talax-engine", "crates/talax-app"]
+members = ["crates/talax-engine", "crates/talax-app", "crates/talax-correct"]
 resolver = "2"
 
 [workspace.package]
-version = "1.13.6"
+version = "1.14.0"
 edition = "2024"
 license = "BSL-1.1"
 authors = ["PureTensor, Inc."]

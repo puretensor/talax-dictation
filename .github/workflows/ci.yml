@@ -48,6 +48,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Workspace tests
         run: cargo test --workspace
+      - name: Engine without runtime features
+        run: cargo test -p talax-engine --no-default-features
+      - name: Sidecar release build
+        run: cargo build --release -p talax-correct
+      - name: Sidecar runtime-dependency gate
+        run: |
+          if cargo tree -p talax-correct -e normal | grep -E 'whisper-rs|cpal|rdev|enigo|arboard'; then
+            echo "talax-correct must not depend on whisper-rs, cpal, rdev, enigo, or arboard"
+            exit 1
+          fi
       - name: Clipboard ownership on isolated X11
         run: env -u WAYLAND_DISPLAY xvfb-run -a cargo test -p talax-engine --test clipboard_x11 -- --ignored
       - name: Frontend dependencies

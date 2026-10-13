@@ -1,7 +1,8 @@
 //! SQLite database for corrections, patterns, and sessions.
 
 use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS correction_patterns (
     context_after TEXT,
     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
     auto_apply INTEGER DEFAULT 0,
+    manual INTEGER NOT NULL DEFAULT 0,
     UNIQUE(original, corrected, context_before, context_after)
 );
 
@@ -94,9 +96,28 @@ pub struct DomainContext {
     pub accent_patterns: std::collections::HashMap<String, String>,
 }
 
+/// A listed correction rule (taught or learned).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuleInfo {
+    pub original: String,
+    pub corrected: String,
+    pub frequency: i64,
+    pub auto_apply: bool,
+    pub manual: bool,
+}
+
+/// Outcome of learning from a reviewed take.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LearnOutcome {
+    pub patterns: Vec<(String, String)>,
+    pub confirmed: usize,
+    pub auto_apply: usize,
+}
+
 pub struct Database {
     conn: Connection,
-    domain_context_path: Option<std::path::PathBuf>,
+    domain_context_path: Option<PathBuf>,
+    lexicon_path: Option<PathBuf>,
 }
 
 impl Database {
@@ -104,10 +125,13 @@ impl Database {
     pub fn open(path: &Path) -> SqlResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate_manual_column(&conn)?;
         Ok(Self {
             conn,
             domain_context_path: None,
+            lexicon_path: None,
         })
     }
 
@@ -116,15 +140,50 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate_manual_column(&conn)?;
         Ok(Self {
             conn,
             domain_context_path: None,
+            lexicon_path: None,
         })
     }
 
     /// Set the path to the domain context JSON file.
-    pub fn set_domain_context_path(&mut self, path: std::path::PathBuf) {
+    pub fn set_domain_context_path(&mut self, path: PathBuf) {
         self.domain_context_path = Some(path);
+    }
+
+    /// Set the path to the one-word-per-line lexicon file.
+    pub fn set_lexicon_path(&mut self, path: PathBuf) {
+        self.lexicon_path = Some(path);
+    }
+
+    /// Load the lexicon: one word per line, trimmed, lowercased.
+    /// `#` comments and blank lines are ignored. A missing file is empty.
+    pub fn get_lexicon(&self) -> HashSet<String> {
+        let Some(path) = &self.lexicon_path else {
+            return HashSet::new();
+        };
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return HashSet::new();
+        };
+        data.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    None
+                } else {
+                    Some(line.to_lowercase())
+                }
+            })
+            .collect()
+    }
+
+    /// Words the user has confirmed unchanged in review.
+    pub fn get_correct_usage_words(&self) -> SqlResult<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT word FROM correct_usages")?;
+        stmt.query_map([], |row| row.get(0))?
+            .collect::<SqlResult<HashSet<_>>>()
     }
 
     /// Get auto-apply correction patterns.
@@ -289,9 +348,11 @@ impl Database {
                         original,
                         corrected,
                     } => {
-                        if original.is_empty() || corrected.is_empty() {
+                        let Some((original, corrected)) =
+                            normalize_learned_pair(original, corrected)
+                        else {
                             continue;
-                        }
+                        };
 
                         transaction.execute(
                             "INSERT INTO word_corrections (segment_id, original, corrected, position)
@@ -304,7 +365,7 @@ impl Database {
                              VALUES (?1, ?2, 1, 0.5, '', '')
                              ON CONFLICT(original, corrected, context_before, context_after)
                              DO UPDATE SET frequency = frequency + 1, last_seen = CURRENT_TIMESTAMP",
-                            params![original.to_lowercase(), corrected],
+                            params![original, corrected],
                         )?;
                     }
                     WordAlignment::Delete(_) | WordAlignment::Insert(_) => {}
@@ -438,9 +499,12 @@ impl Database {
     }
 
     /// Rebuild auto_apply flags based on frequency and confidence thresholds.
+    /// Manual (taught) rules stay auto-applied.
     fn rebuild_auto_apply(conn: &Connection) -> SqlResult<()> {
-        // First, reset all
-        conn.execute("UPDATE correction_patterns SET auto_apply = 0", [])?;
+        conn.execute(
+            "UPDATE correction_patterns SET auto_apply = 0 WHERE COALESCE(manual, 0) = 0",
+            [],
+        )?;
 
         // Recompute confidence using correct_usages
         // confidence = frequency / (frequency + correct_usages)
@@ -450,9 +514,218 @@ impl Database {
                     (SELECT cu.frequency FROM correct_usages cu WHERE cu.word = correction_patterns.original), 0
                 ) + 1);
              UPDATE correction_patterns SET auto_apply = 1
-                WHERE frequency >= 3 AND confidence >= 0.75;",
+                WHERE (frequency >= 3 AND confidence >= 0.75)
+                   OR COALESCE(manual, 0) = 1;",
         )?;
         Ok(())
+    }
+
+    /// Teach a manual substitution that auto-applies immediately.
+    pub fn teach_rule(&self, original: &str, corrected: &str) -> SqlResult<()> {
+        let original = original.trim();
+        let corrected = corrected.trim();
+        if original.is_empty() || corrected.is_empty() {
+            return Err(rule_error("original and corrected must be non-empty"));
+        }
+        // Casing-only rules (puretensor -> PureTensor) are legitimate; identical ones are not.
+        if original == corrected {
+            return Err(rule_error("original and corrected must differ"));
+        }
+        let original = original.to_lowercase();
+        self.conn.execute(
+            "INSERT INTO correction_patterns
+                (original, corrected, frequency, confidence, context_before, context_after, auto_apply, manual)
+             VALUES (?1, ?2, 1, 1.0, '', '', 1, 1)
+             ON CONFLICT(original, corrected, context_before, context_after)
+             DO UPDATE SET manual = 1, auto_apply = 1",
+            params![original, corrected],
+        )?;
+        Ok(())
+    }
+
+    /// Delete matching rules (manual and learned). Case-insensitive on original.
+    pub fn forget_rule(&self, original: &str, corrected: Option<&str>) -> SqlResult<usize> {
+        let original = original.to_lowercase();
+        match corrected {
+            Some(corrected) => self.conn.execute(
+                "DELETE FROM correction_patterns WHERE original = ?1 AND corrected = ?2",
+                params![original, corrected],
+            ),
+            None => self.conn.execute(
+                "DELETE FROM correction_patterns WHERE original = ?1",
+                params![original],
+            ),
+        }
+    }
+
+    /// List taught and learned rules.
+    pub fn list_rules(&self) -> SqlResult<Vec<RuleInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT original, corrected, frequency, auto_apply, COALESCE(manual, 0)
+             FROM correction_patterns
+             ORDER BY original ASC, corrected ASC",
+        )?;
+        stmt.query_map([], |row| {
+            Ok(RuleInfo {
+                original: row.get(0)?,
+                corrected: row.get(1)?,
+                frequency: row.get(2)?,
+                auto_apply: row.get::<_, i64>(3)? != 0,
+                manual: row.get::<_, i64>(4)? != 0,
+            })
+        })?
+        .collect()
+    }
+
+    /// Learn from a recorded take: patterns are user changes beyond the pipeline.
+    pub fn learn_from_review(&self, session_id: &str, final_text: &str) -> SqlResult<LearnOutcome> {
+        let transaction = self.conn.unchecked_transaction()?;
+
+        let segment: Option<(i64, String, Option<String>, bool)> = transaction
+            .query_row(
+                "SELECT id, original_text, corrected_text, reviewed
+                 FROM segments
+                 WHERE session_id = ?1 AND segment_index = 0",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((segment_id, original_text, pipeline_text, was_reviewed)) = segment else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        if was_reviewed {
+            return Err(rule_error("session already reviewed"));
+        }
+
+        let pipeline_text = pipeline_text.as_deref().unwrap_or(&original_text);
+        let orig_words: Vec<&str> = original_text.split_whitespace().collect();
+        let final_words: Vec<&str> = final_text.split_whitespace().collect();
+        let pipeline_words: Vec<&str> = pipeline_text.split_whitespace().collect();
+
+        let pipeline_replaces: HashSet<(String, String)> =
+            align_word_sequences(&orig_words, &pipeline_words)
+                .into_iter()
+                .filter_map(|op| match op {
+                    WordAlignment::Replace {
+                        original,
+                        corrected,
+                    } => normalize_learned_pair(original, corrected),
+                    _ => None,
+                })
+                .collect();
+
+        let mut patterns = Vec::new();
+        let mut seen = HashSet::new();
+        let mut confirmed = 0usize;
+
+        for (position, op) in align_word_sequences(&orig_words, &final_words)
+            .into_iter()
+            .enumerate()
+        {
+            match op {
+                WordAlignment::Equal(word) => {
+                    Self::increment_correct_usage(&transaction, word)?;
+                    confirmed += 1;
+                }
+                WordAlignment::Replace {
+                    original,
+                    corrected,
+                } => {
+                    let Some(pair) = normalize_learned_pair(original, corrected) else {
+                        continue;
+                    };
+                    if pipeline_replaces.contains(&pair) || !seen.insert(pair.clone()) {
+                        continue;
+                    }
+                    transaction.execute(
+                        "INSERT INTO word_corrections (segment_id, original, corrected, position)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![segment_id, pair.0, pair.1, position as i64],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO correction_patterns (original, corrected, frequency, confidence, context_before, context_after)
+                         VALUES (?1, ?2, 1, 0.5, '', '')
+                         ON CONFLICT(original, corrected, context_before, context_after)
+                         DO UPDATE SET frequency = frequency + 1, last_seen = CURRENT_TIMESTAMP",
+                        params![pair.0, pair.1],
+                    )?;
+                    patterns.push(pair);
+                }
+                WordAlignment::Delete(_) | WordAlignment::Insert(_) => {}
+            }
+        }
+
+        transaction.execute(
+            "UPDATE segments SET corrected_text = ?1, reviewed = 1 WHERE id = ?2",
+            params![final_text, segment_id],
+        )?;
+
+        Self::refresh_session_review_state(&transaction, session_id)?;
+        Self::rebuild_auto_apply(&transaction)?;
+
+        let mut auto_apply = 0usize;
+        for (original, corrected) in &patterns {
+            let applied: i64 = transaction.query_row(
+                "SELECT auto_apply FROM correction_patterns
+                 WHERE original = ?1 AND corrected = ?2
+                   AND context_before = '' AND context_after = ''",
+                params![original, corrected],
+                |row| row.get(0),
+            )?;
+            if applied != 0 {
+                auto_apply += 1;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(LearnOutcome {
+            patterns,
+            confirmed,
+            auto_apply,
+        })
+    }
+
+    /// Delete unreviewed sessions older than `days` and their child rows.
+    pub fn prune_unreviewed_older_than(&self, days: i64) -> SqlResult<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let modifier = format!("-{days} days");
+        transaction.execute(
+            "DELETE FROM word_corrections WHERE segment_id IN (
+                SELECT s.id FROM segments s
+                INNER JOIN sessions sess ON sess.id = s.session_id
+                WHERE sess.reviewed = 0 AND sess.created_at < datetime('now', ?1)
+            )",
+            params![modifier],
+        )?;
+        transaction.execute(
+            "DELETE FROM audio_excerpts WHERE segment_id IN (
+                SELECT s.id FROM segments s
+                INNER JOIN sessions sess ON sess.id = s.session_id
+                WHERE sess.reviewed = 0 AND sess.created_at < datetime('now', ?1)
+            )",
+            params![modifier],
+        )?;
+        transaction.execute(
+            "DELETE FROM segments WHERE session_id IN (
+                SELECT id FROM sessions
+                WHERE reviewed = 0 AND created_at < datetime('now', ?1)
+            )",
+            params![modifier],
+        )?;
+        transaction.execute(
+            "DELETE FROM sessions
+             WHERE reviewed = 0 AND created_at < datetime('now', ?1)",
+            params![modifier],
+        )?;
+        transaction.commit()
     }
 
     fn refresh_session_review_state(conn: &Connection, session_id: &str) -> SqlResult<()> {
@@ -578,6 +851,46 @@ impl Database {
             auto_apply_count: auto_count,
         })
     }
+}
+
+fn migrate_manual_column(conn: &Connection) -> SqlResult<()> {
+    let has_manual = {
+        let mut stmt = conn.prepare("PRAGMA table_info(correction_patterns)")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        names.iter().any(|name| name == "manual")
+    };
+    if !has_manual {
+        conn.execute(
+            "ALTER TABLE correction_patterns ADD COLUMN manual INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn rule_error(msg: &str) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        msg.to_string(),
+    )))
+}
+
+fn strip_affix_punct(word: &str) -> &str {
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+}
+
+fn normalize_learned_pair(original: &str, corrected: &str) -> Option<(String, String)> {
+    let original_core = strip_affix_punct(original);
+    let corrected_core = strip_affix_punct(corrected);
+    if original_core.is_empty() || corrected_core.is_empty() {
+        return None;
+    }
+    if original_core.to_lowercase() == corrected_core.to_lowercase() {
+        return None;
+    }
+    Some((original_core.to_lowercase(), corrected_core.to_string()))
 }
 
 fn map_correction_pattern(row: &rusqlite::Row<'_>) -> SqlResult<CorrectionPattern> {
@@ -723,6 +1036,7 @@ mod tests {
         let db = Database {
             conn,
             domain_context_path: None,
+            lexicon_path: None,
         };
 
         assert!(db.get_stats().is_err());

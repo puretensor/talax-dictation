@@ -107,6 +107,27 @@ When you review and correct a transcription, the diff is extracted at the word l
 - Acronym restoration (lowercase to uppercase)
 - Number normalization ("v two" to "v2", "cpu dash node zero" to "cpu-node-0")
 
+## talax-correct (sidecar)
+
+`talax-correct` is the same three-layer pipeline as a long-lived JSON-lines process. ptdictd (the on-device macOS dictation daemon) spawns one sidecar per profile and sends every take through it: stdin is one JSON object per line, stdout is one JSON object per line, logs go to stderr.
+
+```bash
+talax-correct serve --profile-dir DIR [--lexicon FILE] [--retain-days N]
+```
+
+`--lexicon` defaults to `DIR/lexicon.txt`. `--retain-days` defaults to 7 (unreviewed takes older than that are pruned on start). The profile directory is created with mode `0700`.
+
+| op | request fields | success fields |
+|----|----------------|----------------|
+| `health` / `reload` | | `version`, `rules`, `proper_nouns`, `lexicon`, `ngram_trained` |
+| `correct` | `text`, `layers?`, `record?` | `text`, `changes`, `layers_used`, `session_id` |
+| `learn` | `session_id`, `text` | `patterns`, `confirmed`, `auto_apply` |
+| `teach` | `original`, `corrected` | `rules` |
+| `forget` | `original`, `corrected?` | `removed` |
+| `rules` | | `rules` |
+
+Every response includes `"ok": true` or `"ok": false` with a non-empty `"error"`. A request `"id"` is echoed. `reload` re-reads the database, names file, and lexicon.
+
 ## Voice Profiles
 
 Separate correction databases per context. Switch freely between profiles.
@@ -216,8 +237,9 @@ tests (including config validation), frontend unit tests (vitest), and doctests.
 
 ```
 talax-dictation/
-    Cargo.toml                   # Workspace: talax-engine + talax-app
+    Cargo.toml                   # Workspace: talax-engine + talax-app + talax-correct
     crates/
+        talax-correct/        # JSON-lines sidecar for ptdictd
         talax-engine/         # Core library (no UI dependency)
             src/
                 audio/           # cpal capture, VAD, ring buffer
