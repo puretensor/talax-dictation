@@ -6,6 +6,18 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Finalize a SHA-256 hasher into 64 lowercase hex characters.
+/// sha2 0.11 digest output no longer implements `LowerHex`, so encode explicitly.
+fn sha256_hex(hasher: Sha256) -> String {
+    use std::fmt::Write;
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest.iter() {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
 use thiserror::Error;
 use tracing;
 
@@ -251,7 +263,7 @@ impl ModelManager {
             });
         }
 
-        let actual_hash = format!("{:x}", hasher.finalize());
+        let actual_hash = sha256_hex(hasher);
         if actual_hash != spec.sha256 {
             let _ = fs::remove_file(&tmp_dest);
             return Err(ModelError::ChecksumMismatch {
@@ -467,5 +479,16 @@ mod tests {
             assert_eq!(spec.sha256.len(), 64);
             assert!(spec.sha256.chars().all(|c| c.is_ascii_hexdigit()));
         }
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"abc");
+        assert_eq!(
+            sha256_hex(hasher),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex(Sha256::new()).len(), 64);
     }
 }
