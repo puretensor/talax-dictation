@@ -10,7 +10,7 @@ name = "talax-correct"
 path = "src/main.rs"
 
 [dependencies]
-talax-engine = { path = "../talax-engine", version = "1.14.7", default-features = false }
+talax-engine = { path = "../talax-engine", version = "1.14.8", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
