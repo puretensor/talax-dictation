@@ -694,7 +694,16 @@ impl Database {
     }
 
     /// Delete unreviewed sessions older than `days` and their child rows.
+    ///
+    /// `days` is interpolated into a SQLite modifier `"-N days"`. A negative
+    /// value would become `"--N days"`, which SQLite rejects as NULL, and
+    /// `created_at < NULL` deletes nothing.
     pub fn prune_unreviewed_older_than(&self, days: i64) -> SqlResult<()> {
+        if days < 0 {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                NegativeRetainDays,
+            )));
+        }
         let transaction = self.conn.unchecked_transaction()?;
         let modifier = format!("-{days} days");
         transaction.execute(
@@ -1012,6 +1021,17 @@ fn align_word_sequences<'a>(
     ops
 }
 
+#[derive(Debug)]
+struct NegativeRetainDays;
+
+impl std::fmt::Display for NegativeRetainDays {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("retain days must be zero or positive")
+    }
+}
+
+impl std::error::Error for NegativeRetainDays {}
+
 fn normalize_learning_word(word: &str) -> String {
     word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
         .to_lowercase()
@@ -1026,6 +1046,43 @@ mod tests {
         let db = Database::open_memory().unwrap();
         let stats = db.get_stats().unwrap();
         assert_eq!(stats.session_count, 0);
+    }
+
+    fn backdate_unreviewed_session(db: &Database, id: &str) {
+        db.create_session(id, "old.wav", 1.0).unwrap();
+        db.conn
+            .execute(
+                "UPDATE sessions SET created_at = datetime('now', '-30 days') WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+    }
+
+    fn session_count(db: &Database) -> i64 {
+        db.conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn negative_retain_days_is_rejected_and_keeps_the_row() {
+        let db = Database::open_memory().unwrap();
+        backdate_unreviewed_session(&db, "old");
+        let err = db.prune_unreviewed_older_than(-1).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("retain days must be zero or positive"),
+            "{err}"
+        );
+        assert_eq!(session_count(&db), 1);
+    }
+
+    #[test]
+    fn positive_retain_days_still_deletes_an_old_unreviewed_session() {
+        let db = Database::open_memory().unwrap();
+        backdate_unreviewed_session(&db, "old");
+        db.prune_unreviewed_older_than(7).unwrap();
+        assert_eq!(session_count(&db), 0);
     }
 
     #[test]
