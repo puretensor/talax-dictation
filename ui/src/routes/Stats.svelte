@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { getStats } from "../lib/api";
   import type { Stats } from "../lib/api";
+  import { LatestRequest } from "../lib/latest-request";
 
   let stats: Stats = $state({
     session_count: 0,
@@ -10,10 +11,14 @@
     auto_apply_count: 0,
   });
   let loading = $state(true);
+  const statsRequests = new LatestRequest();
 
   async function loadStats() {
+    const request = statsRequests.begin();
     loading = true;
-    stats = await getStats();
+    const next = await getStats();
+    if (!statsRequests.isCurrent(request)) return;
+    stats = next;
     loading = false;
   }
 
