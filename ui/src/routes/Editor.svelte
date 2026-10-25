@@ -4,6 +4,7 @@
   import { getSessions, getSession, saveCorrections } from "../lib/api";
   import { formatError } from "../lib/errors";
   import { LatestRequest } from "../lib/latest-request";
+  import { formatSessionTimestamp } from "../lib/session-time";
   import type { SessionSummary, SessionDetail } from "../lib/api";
 
   type SaveFeedback = { message: string; error: boolean };
@@ -231,12 +232,7 @@
   }
 
   function formatTimestamp(ts: string): string {
-    try {
-      const d = new Date(ts);
-      return d.toLocaleString();
-    } catch {
-      return ts;
-    }
+    return formatSessionTimestamp(ts);
   }
 
   function formatDuration(secs: number): string {

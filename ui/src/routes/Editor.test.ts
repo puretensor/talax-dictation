@@ -81,6 +81,27 @@ describe("Editor request ordering", () => {
     ]);
   });
 
+  it("shows a SQLite CURRENT_TIMESTAMP as the UTC instant", async () => {
+    const env = (globalThis as unknown as { process: { env: { TZ?: string } } })
+      .process.env;
+    const previousTz = env.TZ;
+    env.TZ = "America/New_York";
+    try {
+      api.getSessions.mockResolvedValue([
+        summary("session-1", 4, "2026-07-17 10:00:00"),
+      ]);
+      render(Editor);
+      const utc = new Date("2026-07-17T10:00:00Z").toLocaleString();
+      const local = new Date("2026-07-17 10:00:00").toLocaleString();
+      expect(utc).not.toBe(local);
+      expect(await screen.findByText(utc)).toBeTruthy();
+      expect(screen.queryByText(local)).toBeNull();
+    } finally {
+      if (previousTz === undefined) delete env.TZ;
+      else env.TZ = previousTz;
+    }
+  });
+
   it("keeps the newest expanded session when detail requests finish out of order", async () => {
     const first = deferred<SessionDetail>();
     const second = deferred<SessionDetail>();
