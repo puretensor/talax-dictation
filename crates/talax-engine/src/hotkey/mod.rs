@@ -297,6 +297,41 @@ impl Drop for HotkeyHandle {
 }
 
 // ---------------------------------------------------------------------------
+// Held keys
+// ---------------------------------------------------------------------------
+
+/// Physical keys currently held.
+///
+/// [`Key::from_rdev`] collapses ControlLeft and ControlRight into [`Key::Ctrl`],
+/// and does the same for Shift, Alt, and Meta. A set of those logical keys
+/// drops the chord when either physical modifier is released.
+struct HeldKeys {
+    physical: HashSet<rdev::Key>,
+}
+
+impl HeldKeys {
+    fn new() -> Self {
+        Self {
+            physical: HashSet::new(),
+        }
+    }
+
+    fn press(&mut self, key: rdev::Key) {
+        self.physical.insert(key);
+    }
+
+    fn release(&mut self, key: rdev::Key) {
+        self.physical.remove(&key);
+    }
+
+    fn contains(&self, key: &Key) -> bool {
+        self.physical
+            .iter()
+            .any(|held| Key::from_rdev(held).as_ref() == Some(key))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HotkeyListener
 // ---------------------------------------------------------------------------
 
@@ -346,7 +381,7 @@ impl HotkeyListener {
 
         let (ack_tx, ack_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut held: HashSet<Key> = HashSet::new();
+            let mut held = HeldKeys::new();
             let mut was_active = false;
             let mut toggled_on = false;
 
@@ -357,9 +392,7 @@ impl HotkeyListener {
 
                 match event.event_type {
                     rdev::EventType::KeyPress(rdev_key) => {
-                        if let Some(key) = Key::from_rdev(&rdev_key) {
-                            held.insert(key);
-                        }
+                        held.press(rdev_key);
 
                         let all_held = required.iter().all(|k| held.contains(k));
 
@@ -382,9 +415,7 @@ impl HotkeyListener {
                         }
                     }
                     rdev::EventType::KeyRelease(rdev_key) => {
-                        if let Some(key) = Key::from_rdev(&rdev_key) {
-                            held.remove(&key);
-                        }
+                        held.release(rdev_key);
 
                         let all_held = required.iter().all(|k| held.contains(k));
 
@@ -500,6 +531,29 @@ pub fn parse_hotkey(s: &str) -> Result<HotkeyConfig, HotkeyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_stays_down_until_every_physical_modifier_is_released() {
+        let mut held = HeldKeys::new();
+        held.press(rdev::Key::ControlLeft);
+        held.press(rdev::Key::ControlRight);
+        held.release(rdev::Key::ControlLeft);
+        assert!(
+            held.contains(&Key::Ctrl),
+            "the other Control key is still down"
+        );
+        held.release(rdev::Key::ControlRight);
+        assert!(!held.contains(&Key::Ctrl));
+    }
+
+    #[test]
+    fn key_repeat_does_not_stick_after_one_release() {
+        let mut held = HeldKeys::new();
+        held.press(rdev::Key::Space);
+        held.press(rdev::Key::Space);
+        held.release(rdev::Key::Space);
+        assert!(!held.contains(&Key::Space));
+    }
 
     #[test]
     fn stop_does_not_wait_for_an_unstoppable_listener() {
