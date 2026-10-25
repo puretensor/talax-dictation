@@ -3,16 +3,21 @@
   import { onMount } from "svelte";
   import { getPatterns } from "../lib/api";
   import type { CorrectionPattern } from "../lib/api";
+  import { LatestRequest } from "../lib/latest-request";
 
   let patterns: CorrectionPattern[] = $state([]);
   let loading = $state(true);
   let searchQuery = $state("");
   let sortColumn: keyof CorrectionPattern = $state("frequency");
   let sortAsc = $state(false);
+  const patternRequests = new LatestRequest();
 
   async function loadPatterns() {
+    const request = patternRequests.begin();
     loading = true;
-    patterns = await getPatterns();
+    const next = await getPatterns();
+    if (!patternRequests.isCurrent(request)) return;
+    patterns = next;
     loading = false;
   }
 
