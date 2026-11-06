@@ -15,6 +15,7 @@ runtime = [
     "dep:ureq",
     "dep:sha2",
     "dep:memmap2",
+    "dep:rustls-webpki",
 ]
 
 [dependencies]
@@ -24,7 +25,14 @@ rusqlite = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ureq = { version = "3", optional = true }
+# Floor at 3.5, the locked version. 3.4.3 is the first ureq that requires the
+# patched rustls 0.23.46 (RUSTSEC-2026-0285/0346/0347/0348/0349) and
+# webpki-roots 1.0.10 (RUSTSEC-2026-0381). v1.13.4, #131 and #142 patched
+# those in Cargo.lock alone, and with "3" a stale lock carried through a merge
+# (how #57 and #58 lost earlier fixes) brings back ureq 3.4.2 with rustls
+# 0.23.45 and webpki-roots 1.0.6. 3.5 is also the release that percent-decodes
+# proxy credentials, which check_proxy_env in whisper/model_manager.rs expects.
+ureq = { version = "3.5", optional = true }
 # Floor at 0.18.2 so a lock regeneration cannot silently drop back to
 # 0.18.0/0.18.1. 0.18.2 reports capture xruns as ErrorKind::Xrun and
 # stops treating a nonzero but sub-millisecond ALSA stream timeout as a
@@ -40,6 +48,12 @@ sha2 = { version = "0.11.1", optional = true }
 # regenerations silently fell back to 0.9.10. A floor survives
 # regeneration; a bare lock entry does not.
 memmap2 = { version = "0.9.11", optional = true }
+# Not used directly. Floor on the ureq -> rustls graph: #142 patched
+# Cargo.lock to rustls-webpki 0.103.16 (RUSTSEC-2026-0382), but rustls
+# 0.23.46 still accepts ^0.103.14, so nothing else holds it. It declares no
+# `links` key, so unlike libsqlite3-sys a floor cannot block a rustls bump.
+# Remove once rustls itself requires >= 0.103.16.
+rustls-webpki = { version = "0.103.16", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
