@@ -5,6 +5,20 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The bundled SQLite lives in libsqlite3-sys, a transitive dependency of
+    # rusqlite. Version updates skip transitive crates by default, so SQLite
+    # fixes shipped as libsqlite3-sys patch releases (0.39.1 / SQLite 3.54.1
+    # came out without a rusqlite release) would only reach Cargo.lock with
+    # the next rusqlite minor bump. A non-empty allow list replaces the
+    # default, so keep direct dependencies explicitly. Do not pin
+    # libsqlite3-sys with a "Not used directly" floor instead: it declares
+    # links = "sqlite3", so only one version can exist in the graph and a
+    # caret floor would block every rusqlite bump that moves to a newer
+    # libsqlite3-sys.
+    allow:
+      - dependency-type: direct
+      - dependency-name: libsqlite3-sys
+        dependency-type: indirect
   - package-ecosystem: npm
     directory: /ui
     schedule:
