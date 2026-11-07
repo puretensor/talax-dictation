@@ -119,6 +119,47 @@ fn find_spec(name: &str) -> Option<&'static ModelSpec> {
 }
 
 // ---------------------------------------------------------------------------
+// Proxy configuration
+// ---------------------------------------------------------------------------
+
+/// The variables `ureq::Proxy::try_from_env` reads, in its order of precedence.
+const PROXY_ENV_VARS: [&str; 6] = [
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
+
+/// Reject a proxy variable that ureq would silently skip.
+///
+/// `ureq::get` takes its proxy from the first of [`PROXY_ENV_VARS`] that
+/// parses and drops any that does not, falling back to the next variable or
+/// to a direct connection without reporting it. Since ureq 3.5 that includes
+/// credentials whose percent-escapes are not valid UTF-8 (a Latin-1 `%E9`),
+/// so a mistyped proxy URL would quietly be bypassed or swapped for another
+/// proxy. Fail on the highest-precedence variable instead. The error names
+/// the variable but never echoes its value, which may carry a password.
+fn check_proxy_env(var: impl Fn(&str) -> Option<String>) -> Result<(), ModelError> {
+    for name in PROXY_ENV_VARS {
+        let Some(value) = var(name) else { continue };
+        if value.trim().is_empty() {
+            continue;
+        }
+        return match ureq::Proxy::new(&value) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(ModelError::Download(format!(
+                "{name} is set but is not a usable proxy URL, so it would be ignored; \
+                 percent-encode the user name and password as UTF-8 and write a \
+                 literal % as %25"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -214,6 +255,8 @@ impl ModelManager {
         if tmp_dest.exists() {
             let _ = fs::remove_file(&tmp_dest);
         }
+
+        check_proxy_env(|name| std::env::var(name).ok())?;
 
         let response = ureq::get(&url)
             .call()
@@ -479,6 +522,91 @@ mod tests {
             assert_eq!(spec.sha256.len(), 64);
             assert!(spec.sha256.chars().all(|c| c.is_ascii_hexdigit()));
         }
+    }
+
+    /// A fake environment for `check_proxy_env`, so tests never mutate the
+    /// process environment (unsafe in edition 2024, racy under parallel tests).
+    fn proxy_env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn proxy_env_accepts_unset_and_usable_proxies() {
+        assert!(check_proxy_env(proxy_env(&[])).is_ok());
+        assert!(check_proxy_env(proxy_env(&[("HTTPS_PROXY", "http://proxy:3128")])).is_ok());
+        assert!(
+            check_proxy_env(proxy_env(&[(
+                "https_proxy",
+                "http://alice:s3cret@proxy:3128"
+            )]))
+            .is_ok()
+        );
+        // UTF-8 escapes and an escaped literal percent decode cleanly.
+        assert!(
+            check_proxy_env(proxy_env(&[(
+                "ALL_PROXY",
+                "http://alice:p%C3%A9ss@proxy:3128"
+            )]))
+            .is_ok()
+        );
+        assert!(
+            check_proxy_env(proxy_env(&[(
+                "HTTP_PROXY",
+                "http://alice:Summer%252024@proxy:3128"
+            )]))
+            .is_ok()
+        );
+        // ureq uses the first usable variable, so a broken lower-precedence
+        // one never takes effect.
+        assert!(
+            check_proxy_env(proxy_env(&[
+                ("HTTPS_PROXY", "http://proxy:3128"),
+                ("HTTP_PROXY", "http://alice:p%E9ss@other:3128"),
+            ]))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn proxy_env_ignores_blank_variables() {
+        assert!(
+            check_proxy_env(proxy_env(&[
+                ("ALL_PROXY", "  "),
+                ("HTTPS_PROXY", "http://proxy:3128"),
+            ]))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn proxy_env_rejects_a_proxy_ureq_would_skip() {
+        // `%E9` is not valid UTF-8, so ureq drops ALL_PROXY and would quietly
+        // send the download through HTTP_PROXY instead.
+        let err = check_proxy_env(proxy_env(&[
+            ("ALL_PROXY", "http://alice:p%E9ss@proxy:3128"),
+            ("HTTP_PROXY", "http://bob:x@other:3128"),
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ALL_PROXY"), "{err}");
+        assert!(
+            !err.contains("alice") && !err.contains("p%E9ss") && !err.contains("proxy:3128"),
+            "error must not echo the proxy URL: {err}"
+        );
+
+        // An unparseable value is skipped by ureq just the same.
+        let err = check_proxy_env(proxy_env(&[("https_proxy", "http://proxy:3128 ")]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("https_proxy"), "{err}");
     }
 
     #[test]

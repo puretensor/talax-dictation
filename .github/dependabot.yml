@@ -19,6 +19,14 @@ updates:
       - dependency-type: direct
       - dependency-name: libsqlite3-sys
         dependency-type: indirect
+    # tauri requires matching minimums of tauri-build and tauri-macros, so a
+    # tauri bump already moves them and a separate tauri-build PR ends up
+    # stale or empty (#109/#112, #125/#127, #146/#148). One PR per release.
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
   - package-ecosystem: npm
     directory: /ui
     schedule:
