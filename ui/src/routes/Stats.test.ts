@@ -77,3 +77,21 @@ describe("Stats request ordering", () => {
     expect(screen.queryByText("1")).toBeNull();
   });
 });
+
+describe("Stats load failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tauri.profileDataChanged = undefined;
+  });
+
+  it("shows an error instead of zero counts when stats fail to load", async () => {
+    api.getStats.mockRejectedValue("No active profile");
+
+    render(StatsView);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("No active profile");
+    expect(screen.queryByText("Total Sessions")).toBeNull();
+    expect(screen.queryByText(/No data yet/)).toBeNull();
+  });
+});

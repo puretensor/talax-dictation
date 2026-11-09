@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { getStats } from "../lib/api";
   import type { Stats } from "../lib/api";
+  import { formatError } from "../lib/errors";
   import { LatestRequest } from "../lib/latest-request";
 
   let stats: Stats = $state({
@@ -11,14 +12,21 @@
     auto_apply_count: 0,
   });
   let loading = $state(true);
+  let loadError: string | null = $state(null);
   const statsRequests = new LatestRequest();
 
   async function loadStats() {
     const request = statsRequests.begin();
     loading = true;
-    const next = await getStats();
-    if (!statsRequests.isCurrent(request)) return;
-    stats = next;
+    try {
+      const next = await getStats();
+      if (!statsRequests.isCurrent(request)) return;
+      stats = next;
+      loadError = null;
+    } catch (error) {
+      if (!statsRequests.isCurrent(request)) return;
+      loadError = `Failed to load statistics: ${formatError(error)}`;
+    }
     loading = false;
   }
 
@@ -36,6 +44,11 @@
 
   {#if loading}
     <div class="empty-state">Loading statistics...</div>
+  {:else if loadError}
+    <div class="empty-state error" role="alert">
+      <p>{loadError}</p>
+      <button onclick={loadStats}>Retry</button>
+    </div>
   {:else}
     <div class="cards">
       <div class="stat-card">
@@ -78,6 +91,10 @@
     text-align: center;
     padding: 48px 24px;
     color: var(--text-muted, #8b949e);
+  }
+
+  .empty-state.error {
+    color: var(--red, #f85149);
   }
 
   .cards {

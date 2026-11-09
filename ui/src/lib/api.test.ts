@@ -25,21 +25,22 @@ describe("api failure fallbacks", () => {
     mockInvoke.mockReset();
   });
 
-  it("returns safe read defaults when IPC queries fail", async () => {
+  it("returns safe defaults only for optional probes when IPC queries fail", async () => {
     mockInvoke.mockRejectedValue(new Error("ipc unavailable"));
 
     await expect(getProfiles()).resolves.toEqual(["default"]);
-    await expect(getStats()).resolves.toEqual({
-      session_count: 0,
-      pattern_count: 0,
-      auto_apply_count: 0,
-    });
-    await expect(getPatterns()).resolves.toEqual([]);
-    await expect(getSessions()).resolves.toEqual([]);
-    await expect(getSession("missing")).resolves.toBeNull();
     await expect(getAvailableModels()).resolves.toEqual([]);
     await expect(getRecordingStatus()).resolves.toBe("idle");
     await expect(isModelReady()).resolves.toBe(false);
+  });
+
+  it("propagates data read failures instead of faking empty data", async () => {
+    mockInvoke.mockRejectedValue("No active profile");
+
+    await expect(getStats()).rejects.toBe("No active profile");
+    await expect(getPatterns()).rejects.toBe("No active profile");
+    await expect(getSessions()).rejects.toBe("No active profile");
+    await expect(getSession("missing")).rejects.toBe("No active profile");
   });
 
   it("returns complete fallback config and diagnostics", async () => {

@@ -18,6 +18,8 @@
   let saveFeedbacks: Map<string, SaveFeedback> = $state(new Map());
   let loading = $state(true);
   let loadingDetail = $state(false);
+  let loadError: string | null = $state(null);
+  let detailError: string | null = $state(null);
   const saveMessageTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let destroyed = false;
   const sessionRequests = new LatestRequest();
@@ -30,9 +32,12 @@
       const nextSessions = await getSessions();
       if (!sessionRequests.isCurrent(request)) return "stale";
       sessions = nextSessions;
+      loadError = null;
       return "loaded";
-    } catch {
-      return sessionRequests.isCurrent(request) ? "failed" : "stale";
+    } catch (error) {
+      if (!sessionRequests.isCurrent(request)) return "stale";
+      loadError = `Failed to load sessions: ${formatError(error)}`;
+      return "failed";
     } finally {
       if (sessionRequests.isCurrent(request)) loading = false;
     }
@@ -45,6 +50,7 @@
     const detailRequest = detailRequests.begin();
     if (resetDetail) {
       expandedDetail = null;
+      detailError = null;
       loadingDetail = expandedId !== null;
     }
 
@@ -82,10 +88,12 @@
       const detail = await getSession(id);
       if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
       expandedDetail = detail;
+      detailError = null;
       return detail !== null;
-    } catch {
+    } catch (error) {
       if (!detailRequests.isCurrent(request) || expandedId !== id) return false;
       expandedDetail = null;
+      detailError = `Failed to load session: ${formatError(error)}`;
       return false;
     } finally {
       if (detailRequests.isCurrent(request) && expandedId === id) {
@@ -103,6 +111,7 @@
     } else {
       expandedId = id;
       expandedDetail = null;
+      detailError = null;
       await loadExpandedDetail(id);
     }
   }
@@ -273,8 +282,16 @@
     </p>
   {/each}
 
+  {#if loadError}
+    <p class="save-message error editor-feedback" role="alert">
+      {loadError}
+      <button onclick={() => refreshSessionsAndExpanded(true, true)}>Retry</button>
+    </p>
+  {/if}
   {#if loading}
     <div class="empty-state">Loading sessions...</div>
+  {:else if sessions.length === 0 && loadError}
+    <!-- the error above explains the empty list -->
   {:else if sessions.length === 0}
     <div class="empty-state">
       <p>No dictation sessions yet.</p>
@@ -300,6 +317,8 @@
             <div class="session-body">
               {#if loadingDetail}
                 <div class="empty-state">Loading segments...</div>
+              {:else if detailError}
+                <p class="save-message error editor-feedback" role="alert">{detailError}</p>
               {:else if expandedDetail}
                 {#each expandedDetail.segments as segment}
                   <div class="segment">

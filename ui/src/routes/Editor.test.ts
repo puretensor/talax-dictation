@@ -529,3 +529,50 @@ describe("Editor mutation failures", () => {
     );
   });
 });
+
+describe("Editor load failures", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tauri.profileDataChanged = undefined;
+  });
+
+  it("shows an error instead of the empty state when sessions fail to load", async () => {
+    api.getSessions.mockRejectedValue("No active profile");
+
+    render(Editor);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("No active profile");
+    expect(screen.queryByText("No dictation sessions yet.")).toBeNull();
+  });
+
+  it("shows an error when an expanded session fails to load", async () => {
+    api.getSessions.mockResolvedValue([summary("session-1", 4)]);
+    api.getSession.mockRejectedValue("session unreadable");
+    render(Editor);
+
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("session unreadable");
+  });
+
+  it("keeps the open session and reports the error when a refresh fails", async () => {
+    api.getSessions.mockResolvedValue([summary("session-1", 4)]);
+    api.getSession.mockResolvedValue(detail("session-1", "open detail"));
+    render(Editor);
+    await fireEvent.click(
+      (await screen.findAllByRole("button", { name: /1 segment/ }))[0]
+    );
+    expect(await screen.findByText("open detail")).toBeTruthy();
+
+    api.getSessions.mockReset().mockRejectedValue("database locked");
+    await tauri.profileDataChanged!();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("database locked");
+    expect(screen.queryByText("No dictation sessions yet.")).toBeNull();
+  });
+});
