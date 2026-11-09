@@ -114,8 +114,17 @@ fn await_capture_startup(
             Err(err)
         }
         Err(_) => {
+            // The worker only reads the flag after recorder.start() returns, so a
+            // wedged device call would make a join here block past the timeout
+            // (and the caller holds the global state lock). Signal the worker and
+            // reap it on a detached thread; once start() returns it sees the flag
+            // and tears the recorder down.
             stop_flag.store(true, Ordering::Relaxed);
-            let _ = thread.join();
+            let _ = std::thread::Builder::new()
+                .name("talax-capture-reaper".into())
+                .spawn(move || {
+                    let _ = thread.join();
+                });
             Err("audio recorder startup timed out".to_string())
         }
     }
@@ -401,6 +410,33 @@ mod tests {
         assert_eq!(result.unwrap_err(), "audio recorder startup timed out");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(200),
+            "timeout handling blocked for {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn startup_timeout_does_not_block_on_unresponsive_worker() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
+        // Models recorder.start() wedged in a device call: never polls the flag.
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            drop(startup_tx);
+        });
+
+        let started = std::time::Instant::now();
+        let result = await_capture_startup(
+            startup_rx,
+            &stop_flag,
+            thread,
+            std::time::Duration::from_millis(10),
+        );
+
+        assert_eq!(result.unwrap_err(), "audio recorder startup timed out");
+        assert!(stop_flag.load(Ordering::Relaxed));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
             "timeout handling blocked for {:?}",
             started.elapsed()
         );
