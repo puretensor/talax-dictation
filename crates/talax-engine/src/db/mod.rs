@@ -408,20 +408,22 @@ impl Database {
             let original = original.to_lowercase();
             // Test exhaustion against the original frequency. Decrementing
             // first can make a surviving row look exhausted and erase other
-            // segments' contributions.
+            // segments' contributions. Taught (manual) rules are never
+            // deleted here: their frequency is only floored at 1.
             conn.execute(
                 "DELETE FROM correction_patterns
                  WHERE original = ?1 AND corrected = ?2
                    AND context_before = '' AND context_after = ''
+                   AND COALESCE(manual, 0) = 0
                    AND frequency <= ?3",
                 params![original, corrected, count],
             )?;
             conn.execute(
                 "UPDATE correction_patterns
-                 SET frequency = frequency - ?3
+                 SET frequency = MAX(1, frequency - ?3)
                  WHERE original = ?1 AND corrected = ?2
                    AND context_before = '' AND context_after = ''
-                   AND frequency > ?3",
+                   AND (frequency > ?3 OR COALESCE(manual, 0) = 1)",
                 params![original, corrected, count],
             )?;
         }
