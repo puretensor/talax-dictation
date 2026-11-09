@@ -159,19 +159,11 @@ export async function cloneProfile(
 // ---------------------------------------------------------------------------
 
 export async function getStats(): Promise<Stats> {
-  try {
-    return await invoke<Stats>("get_stats");
-  } catch {
-    return { session_count: 0, pattern_count: 0, auto_apply_count: 0 };
-  }
+  return await invoke<Stats>("get_stats");
 }
 
 export async function getPatterns(): Promise<CorrectionPattern[]> {
-  try {
-    return await invoke<CorrectionPattern[]>("get_patterns");
-  } catch {
-    return [];
-  }
+  return await invoke<CorrectionPattern[]>("get_patterns");
 }
 
 export async function correctText(text: string): Promise<PipelineResult> {
@@ -185,21 +177,13 @@ export async function correctText(text: string): Promise<PipelineResult> {
 export async function getSessions(
   limit: number = 50
 ): Promise<SessionSummary[]> {
-  try {
-    return await invoke<SessionSummary[]>("get_sessions", { limit });
-  } catch {
-    return [];
-  }
+  return await invoke<SessionSummary[]>("get_sessions", { limit });
 }
 
 export async function getSession(
   sessionId: string
 ): Promise<SessionDetail | null> {
-  try {
-    return await invoke<SessionDetail>("get_session", { sessionId });
-  } catch {
-    return null;
-  }
+  return await invoke<SessionDetail>("get_session", { sessionId });
 }
 
 export async function saveCorrections(

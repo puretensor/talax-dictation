@@ -3,10 +3,12 @@
   import { onMount } from "svelte";
   import { getPatterns } from "../lib/api";
   import type { CorrectionPattern } from "../lib/api";
+  import { formatError } from "../lib/errors";
   import { LatestRequest } from "../lib/latest-request";
 
   let patterns: CorrectionPattern[] = $state([]);
   let loading = $state(true);
+  let loadError: string | null = $state(null);
   let searchQuery = $state("");
   let sortColumn: keyof CorrectionPattern = $state("frequency");
   let sortAsc = $state(false);
@@ -15,9 +17,15 @@
   async function loadPatterns() {
     const request = patternRequests.begin();
     loading = true;
-    const next = await getPatterns();
-    if (!patternRequests.isCurrent(request)) return;
-    patterns = next;
+    try {
+      const next = await getPatterns();
+      if (!patternRequests.isCurrent(request)) return;
+      patterns = next;
+      loadError = null;
+    } catch (error) {
+      if (!patternRequests.isCurrent(request)) return;
+      loadError = `Failed to load patterns: ${formatError(error)}`;
+    }
     loading = false;
   }
 
@@ -89,6 +97,11 @@
 
   {#if loading}
     <div class="empty-state">Loading patterns...</div>
+  {:else if loadError}
+    <div class="empty-state error" role="alert">
+      <p>{loadError}</p>
+      <button onclick={loadPatterns}>Retry</button>
+    </div>
   {:else if patterns.length === 0}
     <div class="empty-state">
       <p>No correction patterns yet.</p>
@@ -185,6 +198,10 @@
     text-align: center;
     padding: 48px 24px;
     color: var(--text-muted, #8b949e);
+  }
+
+  .empty-state.error {
+    color: var(--red, #f85149);
   }
 
   .empty-state .muted {

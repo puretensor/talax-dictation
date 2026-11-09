@@ -80,3 +80,20 @@ describe("Patterns request ordering", () => {
     expect(screen.queryByText("stale-word")).toBeNull();
   });
 });
+
+describe("Patterns load failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tauri.profileDataChanged = undefined;
+  });
+
+  it("shows an error instead of the empty state when patterns fail to load", async () => {
+    api.getPatterns.mockRejectedValue("No active profile");
+
+    render(PatternsView);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("No active profile");
+    expect(screen.queryByText("No correction patterns yet.")).toBeNull();
+  });
+});
