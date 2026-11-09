@@ -522,3 +522,31 @@ fn casing_only_rules_can_be_taught() {
     let (_db, p) = prof.pipeline();
     assert_eq!(correct(&p, "puretensor rocks"), "PureTensor rocks");
 }
+
+fn taught_rule_survives_resave(resave_text: &str) {
+    let db = Database::open_memory().unwrap();
+    db.create_session("s", "", 0.0).unwrap();
+    db.add_segments("s", &[(0.0, 1.0, "teh cat")]).unwrap();
+    db.save_corrections("s", &[(0, "the cat")]).unwrap();
+    db.teach_rule("teh", "the").unwrap();
+    // Re-saving the reviewed segment removes its earlier learning; that must
+    // not erase the taught rule that shares the pattern row.
+    db.save_corrections("s", &[(0, resave_text)]).unwrap();
+    let rules = db.list_rules().unwrap();
+    let rule = rules
+        .iter()
+        .find(|r| r.original == "teh" && r.corrected == "the")
+        .expect("taught rule must survive a re-save of the segment that taught the same pair");
+    assert!(rule.manual, "taught rule must stay manual");
+    assert!(rule.auto_apply, "taught rule must stay auto-applied");
+}
+
+#[test]
+fn taught_rule_survives_resave_of_reviewed_segment() {
+    taught_rule_survives_resave("teh cat");
+}
+
+#[test]
+fn taught_rule_survives_resave_that_still_contains_the_replacement() {
+    taught_rule_survives_resave("the cat sat");
+}
