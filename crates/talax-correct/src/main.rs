@@ -114,11 +114,26 @@ fn serve(config: Config) -> Result<(), String> {
     };
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => break,
-        };
+    let mut input = stdin.lock();
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match input.read_until(b'\n', &mut raw) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => return Err(format!("read request: {e}")),
+        }
+        // Like `BufRead::lines`: drop the line terminator. A line that is not
+        // valid UTF-8 is decoded lossily, so it gets an error reply (or is
+        // handled, if the damage is inside a JSON string) and the loop goes on
+        // instead of silently ending the session with exit 0.
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+        }
+        let line = String::from_utf8_lossy(&raw);
         let reply = handle_line(&mut server, &line);
         writeln!(stdout, "{reply}").map_err(|e| format!("write response: {e}"))?;
         stdout.flush().map_err(|e| format!("flush response: {e}"))?;
