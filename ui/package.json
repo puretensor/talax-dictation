@@ -1,7 +1,7 @@
 {
   "name": "talax-ui",
   "private": true,
-  "version": "1.14.19",
+  "version": "1.14.20",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

@@ -3,6 +3,8 @@
 //! Fastest layer -- applies high-confidence corrections from the learned
 //! pattern database. Sub-millisecond for typical text lengths.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use rusqlite::Result as SqlResult;
 
@@ -108,9 +110,14 @@ impl DictionaryCorrector {
     }
 }
 
-/// Same notion of a word character as the regex crate's `\w` for ordinary text.
+/// A word character is exactly what the regex crate's `\w` matches (letters,
+/// decimal digits, connector punctuation, combining marks, join controls), so
+/// ordinary rules keep the boundaries `\b` gave them. The check is a
+/// precompiled anchored regex on the single neighbour character.
 fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w$").expect("valid regex"));
+    let mut buf = [0u8; 4];
+    WORD.is_match(c.encode_utf8(&mut buf))
 }
 
 /// Find matches of `re` whose neighbours are not word characters (or the text
@@ -344,6 +351,58 @@ mod tests {
             corrected("node.js", "Node.js", "xnode.js node.jsx"),
             "xnode.js node.jsx"
         );
+    }
+
+    #[test]
+    fn word_char_agrees_with_regex_w() {
+        let w = Regex::new(r"^\w$").unwrap();
+        for c in ('\u{0}'..='\u{2FFF}').chain('\u{A000}'..='\u{FFFF}') {
+            assert_eq!(
+                is_word_char(c),
+                w.is_match(&c.to_string()),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        // letters, digits, underscore, connector, combining mark, join controls
+        for c in [
+            'a', 'Z', 'é', '7', '_', '\u{203F}', '\u{0301}', '\u{200C}', '\u{200D}',
+        ] {
+            assert!(is_word_char(c), "{c:?}");
+        }
+        // superscript two, vulgar fraction, punctuation, space
+        for c in ['\u{00B2}', '\u{00BD}', '+', '.', ' ', '#'] {
+            assert!(!is_word_char(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn combining_mark_and_connector_neighbours_are_word_chars() {
+        assert_eq!(
+            corrected("cafe", "CAFE", "cafe\u{0301} cafe"),
+            "cafe\u{0301} CAFE"
+        );
+        assert_eq!(
+            corrected("cafe", "CAFE", "cafe\u{203F}x cafe"),
+            "cafe\u{203F}x CAFE"
+        );
+        assert_eq!(corrected("cafe", "CAFE", "\u{203F}cafe"), "\u{203F}cafe");
+    }
+
+    #[test]
+    fn superscript_digit_is_not_a_word_char() {
+        assert_eq!(corrected("m", "M", "m\u{00B2}"), "M\u{00B2}");
+        assert_eq!(corrected("m", "M", "\u{00B2}m"), "\u{00B2}M");
+        assert_eq!(corrected("m", "M", "m2 m"), "m2 M");
+    }
+
+    #[test]
+    fn symbol_edged_rule_needs_the_whole_token() {
+        // A taught rule fires on the token the user taught, not inside a
+        // longer token: ".net" is left alone in "asp.net", "@bob" in "a@bob".
+        assert_eq!(corrected(".net", ".NET", "asp.net"), "asp.net");
+        assert_eq!(corrected("@bob", "@Bob", "a@bob"), "a@bob");
+        assert_eq!(corrected("@bob", "@Bob", "hi @bob!"), "hi @Bob!");
     }
 
     #[test]
