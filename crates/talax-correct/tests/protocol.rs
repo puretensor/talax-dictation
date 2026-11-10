@@ -364,6 +364,25 @@ fn profile_dir_is_private() {
 }
 
 #[test]
+fn retain_days_below_one_is_rejected() {
+    for days in ["-1", "0", "-5"] {
+        let prof = profile_with_names(&[]);
+        let out = Command::new(BIN)
+            .arg("serve")
+            .arg("--profile-dir")
+            .arg(prof.path())
+            .arg("--retain-days")
+            .arg(days)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run talax-correct");
+        assert!(!out.status.success(), "--retain-days {days} must fail");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("--retain-days must be at least 1"), "{err}");
+    }
+}
+
+#[test]
 fn old_unreviewed_takes_are_pruned_at_start() {
     let prof = profile_with_names(&[]);
     // Create the database through a first run, then age two sessions by hand.

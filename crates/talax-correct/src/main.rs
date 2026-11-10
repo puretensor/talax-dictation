@@ -55,6 +55,11 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 retain_days = raw
                     .parse()
                     .map_err(|_| format!("--retain-days expects an integer, got '{raw}'"))?;
+                if retain_days < 1 {
+                    return Err(format!(
+                        "--retain-days must be at least 1 (days to keep unreviewed takes), got {retain_days}"
+                    ));
+                }
             }
             other => return Err(format!("unknown argument '{other}'\n{usage}")),
         }

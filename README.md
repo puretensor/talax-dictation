@@ -115,7 +115,7 @@ When you review and correct a transcription, the diff is extracted at the word l
 talax-correct serve --profile-dir DIR [--lexicon FILE] [--retain-days N]
 ```
 
-`--lexicon` defaults to `DIR/lexicon.txt`. `--retain-days` defaults to 7 (unreviewed takes older than that are pruned on start). The profile directory is created with mode `0700`.
+`--lexicon` defaults to `DIR/lexicon.txt`. `--retain-days` defaults to 7 (unreviewed takes older than that are pruned on start) and must be at least 1; zero and negative values are rejected. The profile directory is created with mode `0700`.
 
 | op | request fields | success fields |
 |----|----------------|----------------|
