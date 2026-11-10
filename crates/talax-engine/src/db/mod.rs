@@ -696,7 +696,14 @@ impl Database {
     }
 
     /// Delete unreviewed sessions older than `days` and their child rows.
+    /// `days` must be at least 1: a negative value would build an invalid SQLite
+    /// modifier (nothing is ever pruned) and 0 would prune every unreviewed take.
     pub fn prune_unreviewed_older_than(&self, days: i64) -> SqlResult<()> {
+        if days < 1 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "retention must be at least 1 day, got {days}"
+            )));
+        }
         let transaction = self.conn.unchecked_transaction()?;
         let modifier = format!("-{days} days");
         transaction.execute(
@@ -1022,6 +1029,28 @@ fn normalize_learning_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_rejects_retention_below_one_day() {
+        let db = Database::open_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO sessions (id, created_at, reviewed) VALUES ('s', datetime('now', '-30 days'), 0)",
+                [],
+            )
+            .unwrap();
+        for days in [-5, -1, 0] {
+            assert!(db.prune_unreviewed_older_than(days).is_err(), "{days}");
+        }
+        let count = |db: &Database| -> i64 {
+            db.conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(&db), 1, "rejected calls must not delete anything");
+        db.prune_unreviewed_older_than(1).unwrap();
+        assert_eq!(count(&db), 0);
+    }
 
     #[test]
     fn test_open_memory() {

@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -159,6 +160,21 @@ fn check_proxy_env(var: impl Fn(&str) -> Option<String>) -> Result<(), ModelErro
     Ok(())
 }
 
+/// Deletes its path on drop unless disarmed (used for the temporary download file).
+struct TempFileGuard(PathBuf);
+
+impl TempFileGuard {
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -247,18 +263,35 @@ impl ModelManager {
             .ok_or_else(|| ModelError::UnknownModel(model_name.to_string()))?;
 
         let url = format!("{}/{}", HF_BASE, spec.filename);
+        check_proxy_env(|name| std::env::var(name).ok())?;
+        self.download_spec(
+            spec,
+            &url,
+            &ureq::Agent::new_with_defaults(),
+            progress_callback,
+        )
+    }
+
+    /// Fetch `url` into a temporary file that no other download shares, verify
+    /// size and SHA-256 against `spec`, then rename it into place atomically.
+    /// Two overlapping downloads of the same model each use their own file, so
+    /// neither can delete or truncate the other's bytes.
+    fn download_spec(
+        &self,
+        spec: &ModelSpec,
+        url: &str,
+        agent: &ureq::Agent,
+        progress_callback: impl Fn(u64, u64),
+    ) -> Result<PathBuf, ModelError> {
         let dest = self.model_file_path(spec);
         let tmp_dest = self.temp_model_file_path(spec);
+        // Removes the temporary file on every exit path that did not rename it.
+        let guard = TempFileGuard(tmp_dest.clone());
 
         tracing::info!(model = spec.name, %url, "starting model download");
 
-        if tmp_dest.exists() {
-            let _ = fs::remove_file(&tmp_dest);
-        }
-
-        check_proxy_env(|name| std::env::var(name).ok())?;
-
-        let response = ureq::get(&url)
+        let response = agent
+            .get(url)
             .call()
             .map_err(|e| ModelError::Download(e.to_string()))?;
 
@@ -287,9 +320,17 @@ impl ModelManager {
             if n == 0 {
                 break;
             }
+            downloaded += n as u64;
+            if downloaded > spec.size_bytes {
+                // Never write more than the catalogue size, whatever the server sends.
+                return Err(ModelError::SizeMismatch {
+                    name: spec.name.to_string(),
+                    expected: spec.size_bytes,
+                    actual: downloaded,
+                });
+            }
             file.write_all(&buf[..n])?;
             hasher.update(&buf[..n]);
-            downloaded += n as u64;
             progress_callback(downloaded, total);
         }
 
@@ -298,7 +339,6 @@ impl ModelManager {
 
         let actual = fs::metadata(&tmp_dest)?.len();
         if actual != spec.size_bytes {
-            let _ = fs::remove_file(&tmp_dest);
             return Err(ModelError::SizeMismatch {
                 name: spec.name.to_string(),
                 expected: spec.size_bytes,
@@ -308,7 +348,6 @@ impl ModelManager {
 
         let actual_hash = sha256_hex(hasher);
         if actual_hash != spec.sha256 {
-            let _ = fs::remove_file(&tmp_dest);
             return Err(ModelError::ChecksumMismatch {
                 name: spec.name.to_string(),
                 expected: spec.sha256.to_string(),
@@ -317,6 +356,7 @@ impl ModelManager {
         }
 
         fs::rename(&tmp_dest, &dest)?;
+        guard.disarm();
         tracing::info!(model = spec.name, bytes = actual, "download complete");
 
         Ok(dest)
@@ -339,8 +379,18 @@ impl ModelManager {
         self.models_dir.join(spec.filename)
     }
 
+    /// A fresh temporary path in the models directory (same filesystem as the
+    /// destination, so the final rename is atomic). It still ends in `.part`,
+    /// which is what `cleanup_partial_downloads` removes at start-up.
     fn temp_model_file_path(&self, spec: &ModelSpec) -> PathBuf {
-        self.models_dir.join(format!("{}.part", spec.filename))
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.models_dir.join(format!(
+            "{}.{}-{}.part",
+            spec.filename,
+            std::process::id(),
+            id
+        ))
     }
 
     fn cleanup_partial_downloads(&self) -> Result<(), ModelError> {
@@ -618,5 +668,117 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(sha256_hex(Sha256::new()).len(), 64);
+    }
+
+    // ---- download_spec against a local server (no network) ----
+
+    const BODY: &[u8] = b"abc";
+    const BODY_SHA: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    fn test_spec(size_bytes: u64, sha256: &'static str) -> ModelSpec {
+        ModelSpec {
+            name: "test.model",
+            filename: "ggml-test.bin",
+            size_bytes,
+            sha256,
+            description: "test",
+        }
+    }
+
+    /// Serve `body` to every connection, one byte first and the rest after
+    /// `pause`, so overlapping downloads really overlap. Returns the base URL.
+    fn serve_body(body: &'static [u8], pause: std::time::Duration) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                std::thread::spawn(move || {
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body[..1]);
+                    let _ = stream.flush();
+                    std::thread::sleep(pause);
+                    let _ = stream.write_all(&body[1..]);
+                });
+            }
+        });
+        url
+    }
+
+    fn local_agent() -> ureq::Agent {
+        ureq::Agent::new_with_config(ureq::Agent::config_builder().proxy(None).build())
+    }
+
+    fn part_files(dir: &std::path::Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "part"))
+            .collect()
+    }
+
+    #[test]
+    fn download_spec_installs_a_verified_file() {
+        let dir = tmp_dir();
+        let mgr = ModelManager::new(dir.clone()).unwrap();
+        let url = serve_body(BODY, std::time::Duration::from_millis(0));
+        let spec = test_spec(3, BODY_SHA);
+        let path = mgr
+            .download_spec(&spec, &url, &local_agent(), |_, _| {})
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), BODY);
+        assert!(part_files(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_downloads_of_one_model_both_succeed() {
+        let dir = tmp_dir();
+        let mgr = ModelManager::new(dir.clone()).unwrap();
+        let url = serve_body(BODY, std::time::Duration::from_millis(400));
+        let spec = test_spec(3, BODY_SHA);
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| mgr.download_spec(&spec, &url, &local_agent(), |_, _| {})))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for result in results {
+            let path = result.expect("each overlapping download must complete");
+            assert_eq!(fs::read(path).unwrap(), BODY);
+        }
+        assert!(part_files(&dir).is_empty(), "no temporary file is left");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_download_leaves_no_temporary_file_and_no_model() {
+        let dir = tmp_dir();
+        let mgr = ModelManager::new(dir.clone()).unwrap();
+        let url = serve_body(BODY, std::time::Duration::from_millis(0));
+        let bad_hash = test_spec(
+            3,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let err = mgr
+            .download_spec(&bad_hash, &url, &local_agent(), |_, _| {})
+            .unwrap_err();
+        assert!(matches!(err, ModelError::ChecksumMismatch { .. }), "{err}");
+        // The catalogue size is a hard cap on what is written.
+        let too_small = test_spec(2, BODY_SHA);
+        let err = mgr
+            .download_spec(&too_small, &url, &local_agent(), |_, _| {})
+            .unwrap_err();
+        assert!(matches!(err, ModelError::SizeMismatch { .. }), "{err}");
+        assert!(part_files(&dir).is_empty());
+        assert!(!dir.join("ggml-test.bin").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -282,6 +282,29 @@ fn bad_input_is_answered_and_the_sidecar_keeps_serving() {
 }
 
 #[test]
+fn invalid_utf8_line_is_answered_and_the_sidecar_keeps_serving() {
+    let prof = profile_with_names(&[]);
+    let mut s = Sidecar::start(prof.path(), None);
+    s.ok(json!({"op": "health"}));
+    let stdin = s.stdin.as_mut().unwrap();
+    let mut bad = br#"{"op": "correct", "text": "a"#.to_vec();
+    bad.push(0xFF);
+    bad.extend_from_slice(b"\"}\n");
+    stdin.write_all(&bad).unwrap();
+    // A line that is not JSON at all and holds a lone 0xFF byte.
+    stdin.write_all(&[0xFF, 0xFE, b'\n']).unwrap();
+    stdin.flush().unwrap();
+    for _ in 0..2 {
+        let reply = s.lines.recv_timeout(TIMEOUT).expect("a reply per bad line");
+        let r: Value = serde_json::from_str(&reply).expect("reply is JSON");
+        assert!(r["ok"].is_boolean(), "{r}");
+    }
+    // The lines after the bad ones are still served, and EOF is still a clean exit.
+    s.ok(json!({"op": "health"}));
+    assert!(s.close().success());
+}
+
+#[test]
 fn rules_persist_across_restarts() {
     let prof = profile_with_names(&[]);
     let mut s = Sidecar::start(prof.path(), None);
@@ -338,6 +361,25 @@ fn profile_dir_is_private() {
         mode, 0o700,
         "recorded takes are a log of everything dictated"
     );
+}
+
+#[test]
+fn retain_days_below_one_is_rejected() {
+    for days in ["-1", "0", "-5"] {
+        let prof = profile_with_names(&[]);
+        let out = Command::new(BIN)
+            .arg("serve")
+            .arg("--profile-dir")
+            .arg(prof.path())
+            .arg("--retain-days")
+            .arg(days)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run talax-correct");
+        assert!(!out.status.success(), "--retain-days {days} must fail");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("--retain-days must be at least 1"), "{err}");
+    }
 }
 
 #[test]
