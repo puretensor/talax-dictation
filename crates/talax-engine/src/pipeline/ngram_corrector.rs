@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::db::CorrectionPattern;
 
-use super::Change;
+use super::{Change, word_layout::WordLayout};
 
 type Trigrams = HashMap<(String, String), HashMap<String, u32>>;
 type Bigrams = HashMap<String, HashMap<String, u32>>;
@@ -260,7 +260,7 @@ impl NgramCorrector {
             }
         }
 
-        (words.join(" "), changes)
+        (WordLayout::new(text).render(&words), changes)
     }
 
     fn suggest_corrections(&self, text: &str, threshold: f64) -> Vec<Change> {
@@ -329,6 +329,33 @@ impl NgramCorrector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_text_preserves_whitespace() {
+        let corrector = NgramCorrector::new();
+        for text in [
+            "first line\n\nsecond paragraph",
+            "  café\tnaïve\r\n",
+            "\t\n\u{2003}",
+        ] {
+            let (corrected, changes) = corrector.apply(text);
+            assert_eq!(corrected, text);
+            assert!(changes.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepted_correction_preserves_whitespace() {
+        let mut corrector = NgramCorrector::new();
+        corrector.train(&vec!["the quick brown fox".to_string(); 20]);
+        corrector
+            .model
+            .corrections_index
+            .insert("teh".into(), vec!["the".into()]);
+        let (corrected, changes) = corrector.apply("  teh\tquick\n\nbrown fox  ");
+        assert_eq!(corrected, "  the\tquick\n\nbrown fox  ");
+        assert_eq!(changes.len(), 1);
+    }
 
     #[test]
     fn test_train_and_query() {

@@ -1,6 +1,7 @@
 pub mod dict_corrector;
 pub mod heuristic;
 pub mod ngram_corrector;
+mod word_layout;
 
 use dict_corrector::DictionaryCorrector;
 use heuristic::HeuristicExpander;

@@ -431,3 +431,22 @@ fn old_unreviewed_takes_are_pruned_at_start() {
         .unwrap();
     assert_eq!(orphans, 0);
 }
+
+#[test]
+fn correction_protocol_preserves_multiline_formatting() {
+    let prof = profile_with_names(&["Tibo"]);
+    let mut s = Sidecar::start(prof.path(), None);
+    for input in [
+        "first line\n\nsecond paragraph",
+        "  plain\twords\r\n",
+        "\t\n\u{2003}",
+    ] {
+        let r = s.ok(json!({"op": "correct", "text": input}));
+        assert_eq!(text(&r), input);
+        assert_eq!(r["changes"], json!([]));
+    }
+    let r = s.ok(json!({"op": "correct", "text": "  Tipo,\n\nhello.\t"}));
+    assert_eq!(text(&r), "  Tibo,\n\nhello.\t");
+    assert_eq!(r["changes"].as_array().unwrap().len(), 1);
+    assert!(s.close().success());
+}
