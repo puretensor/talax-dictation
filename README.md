@@ -260,3 +260,5 @@ talax-dictation/
 ## License
 
 Business Source License 1.1. Copyright 2026 PureTensor, Inc. Converts to Apache 2.0 on 2030-03-28. See [LICENSE](LICENSE).
+
+Correction preserves existing whitespace, including blank lines and tabs, outside a replaced phrase. A multi-word correction may consume the spaces within that phrase.

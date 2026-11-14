@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::Change;
+use super::{Change, word_layout::WordLayout};
 
 /// Candidate correction with scoring metadata.
 #[derive(Debug, Clone)]
@@ -155,13 +155,14 @@ impl HeuristicExpander {
     /// Apply all heuristic corrections.
     pub fn apply(&self, text: &str) -> (String, Vec<Change>) {
         let mut words: Vec<String> = text.split_whitespace().map(String::from).collect();
+        let mut layout = WordLayout::new(text);
         let mut changes = Vec::new();
 
         // Phase 0: Number/code normalization (multi-word patterns first)
-        self.apply_number_normalization(&mut words, &mut changes);
+        self.apply_number_normalization(&mut words, &mut layout, &mut changes);
 
         // Phase 1: Bigram compound detection (must happen before single-word passes)
-        self.apply_bigram_compounds(&mut words, &mut changes);
+        self.apply_bigram_compounds(&mut words, &mut layout, &mut changes);
 
         // Phase 2: Per-word corrections (operate on the alphanumeric core)
         let mut i = 0;
@@ -255,7 +256,7 @@ impl HeuristicExpander {
             i += 1;
         }
 
-        (words.join(" "), changes)
+        (layout.render(&words), changes)
     }
 
     /// Check if a word is a known acronym that needs case correction.
@@ -321,7 +322,12 @@ impl HeuristicExpander {
     }
 
     /// Apply bigram compound detection: adjacent words that form a known compound.
-    fn apply_bigram_compounds(&self, words: &mut Vec<String>, changes: &mut Vec<Change>) {
+    fn apply_bigram_compounds(
+        &self,
+        words: &mut Vec<String>,
+        layout: &mut WordLayout<'_>,
+        changes: &mut Vec<Change>,
+    ) {
         if words.len() < 2 {
             return;
         }
@@ -341,6 +347,7 @@ impl HeuristicExpander {
                     corrected_score: None,
                 });
                 words[i] = compound.clone();
+                layout.merge(i, 2);
                 words.remove(i + 1);
                 // Don't increment i; re-check the new word against the next one
             } else {
@@ -355,7 +362,12 @@ impl HeuristicExpander {
     /// - "cpu dash node zero" -> "cpu-node-0" (example)
     /// - "v two" -> "v2"
     /// - "three point five" -> "3.5"
-    fn apply_number_normalization(&self, words: &mut Vec<String>, changes: &mut Vec<Change>) {
+    fn apply_number_normalization(
+        &self,
+        words: &mut Vec<String>,
+        layout: &mut WordLayout<'_>,
+        changes: &mut Vec<Change>,
+    ) {
         // Pass 1: Multi-word number patterns (scan left to right, replace in place)
         // "X point Y" -> "X.Y" (version/decimal numbers)
         let mut i = 0;
@@ -382,6 +394,7 @@ impl HeuristicExpander {
                     corrected_score: None,
                 });
                 words[i] = replacement;
+                layout.merge(i, 3);
                 words.remove(i + 2);
                 words.remove(i + 1);
                 continue; // recheck at same position
@@ -413,6 +426,7 @@ impl HeuristicExpander {
                     corrected_score: None,
                 });
                 words[i] = replacement;
+                layout.merge(i, 2);
                 words.remove(i + 1);
                 continue;
             }
@@ -453,6 +467,7 @@ impl HeuristicExpander {
                         corrected_score: None,
                     });
                     words[i] = candidate;
+                    layout.merge(i, consume_count);
                     // Remove consumed words in reverse order
                     for _ in 1..consume_count {
                         words.remove(i + 1);
@@ -488,6 +503,7 @@ impl HeuristicExpander {
                         corrected_score: None,
                     });
                     words[i] = correct.clone();
+                    layout.merge(i, 2);
                     words.remove(i + 1);
                     continue;
                 }
@@ -1014,6 +1030,35 @@ mod tests {
     use super::*;
 
     // === Levenshtein ===
+
+    #[test]
+    fn unchanged_text_preserves_all_whitespace() {
+        let exp = HeuristicExpander::new();
+        for text in [
+            "first line\n\nsecond paragraph",
+            "  tab\tseparated\r\ntext  ",
+            "\t\n\u{2003}",
+            "café\u{2003}naïve",
+        ] {
+            let (corrected, changes) = exp.apply(text);
+            assert_eq!(corrected, text);
+            assert!(changes.is_empty());
+        }
+    }
+
+    #[test]
+    fn replacements_preserve_surrounding_whitespace() {
+        let mut exp = HeuristicExpander::new();
+        exp.proper_nouns
+            .insert("gpu-server".into(), "gpu-server".into());
+        exp.derive_compounds();
+        let (corrected, changes) = exp.apply("  restart\tgpu   server\n\nnow  ");
+        assert_eq!(corrected, "  restart\tgpu-server\n\nnow  ");
+        assert_eq!(changes.len(), 1);
+        let (corrected, changes) = exp.apply("first\n\nv two\tthen three point five  ");
+        assert_eq!(corrected, "first\n\nv2\tthen 3.5  ");
+        assert_eq!(changes.len(), 2);
+    }
 
     #[test]
     fn test_levenshtein() {
